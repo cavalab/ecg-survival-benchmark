@@ -1,0 +1,17 @@
+#!/bin/bash
+#SBATCH --partition=bch-compute-pe
+#SBATCH --time=04:00:00
+#SBATCH --job-name=Code15_ECG_Process
+#SBATCH --output=./Job_File_Out/Out_Code15_ECG_Process.txt
+#SBATCH --ntasks=1
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --mem=512G
+
+
+pwd
+
+module load singularity
+
+
+singularity exec Sing_Torch_05032024.sif python3 './RAW_DATA/Code15_ECG_Process_8020.py' 
