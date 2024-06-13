@@ -1,4 +1,5 @@
-# args['K_M']       int. sets kernel width multiplier
+# InceptionTimeRegression_PyCox is a Generic_Model_PyCox, which in turn is a Generic_Model
+# args['K_M'] defaults to 1. Scales kernel widths from default of [10,20,40] 
 
 # adapted from
 # https://github.com/TheMrGhostman/InceptionTime-Pytorch/commit/2a1b81d82b624c9033e73a2e7ee9bba2414217ef

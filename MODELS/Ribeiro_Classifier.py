@@ -1,8 +1,14 @@
+# Ribeiro_Classifier is a Generic_Model
+# args['Norm_Func'] defaults to 'None'
+# args['seq_length'] defaults to 4096
+# args['sample_freq'] defaults to 400Hz
+# args['scale_multiplier'] defaults to 10 (all inputs are scaled by 10)
+# args['dropout_rate'] defaults to 0.8
+# args['kernel_size'] defaults to 17
+
 # Originally from https://github.com/antonior92/ecg-age-prediction
 # Heavily modified by PVL to line up with rest of flow
 # Where possible, the original code was kept
-
-# Currently, error with 1-dimensional inputs (UCR)
 
 import json
 import torch
@@ -41,31 +47,6 @@ class Ribeiro_Classifier(Generic_Model):
     def __init__(self, args, Data):
         
         print('Ribeiro Classifier currently expects signals to have length 4096')
-        # if ('x_train' in Data.keys()):
-        #     if ( len(Data['x_train'].shape) == 2): # if 2d, pad 2nd dim
-        #         Data['x_train'] = np.pad(Data['x_train'], (0, 4096 - Data['x_train'].shape[1]) )
-                
-        # if ('x_test' in Data.keys()):
-        #     if ( len(Data['x_test'].shape) == 2): # if 2d, pad 2nd dim
-        #         Data['x_test'] = np.pad(Data['x_test'], (0, 4096 - Data['x_test'].shape[1]) )
-                
-        # if ('x_train' in Data.keys()):
-        #     if ( len(Data['x_train'].shape) == 2): # if 2d, pad 2nd dim
-        #         Data['x_train'] = np.pad(Data['x_train'], (0, 4096 - Data['x_train'].shape[1]) )
-        # # Rep_Chan = 1
-        # # Data['x_train'] = np.repeat(np.expand_dims(Data['x_train'],axis=2),Rep_Chan,axis=2)
-        # Data['x_train'] = np.repeat(Data['x_train'],np.ceil(4096 / Data['x_train'].shape[1]),axis=1) # still err
-        # Data['x_train'] = Data['x_train'][:,0:4096,:] # match len exactly
-        
-        # # Data['x_test'] = np.repeat(np.expand_dims(Data['x_test'],axis=2),Rep_Chan,axis=2)
-        # Data['x_test'] = np.repeat(Data['x_test'],np.ceil(4096 / Data['x_test'].shape[1]),axis=1) # still err
-        # Data['x_test'] = Data['x_test'][:,0:4096,:] # match len exactly
-        
-        # # Data['x_valid'] = np.repeat(np.expand_dims(Data['x_valid'],axis=2),Rep_Chan,axis=2)
-        # Data['x_valid'] = np.repeat(Data['x_valid'],np.ceil(4096 / Data['x_valid'].shape[1]),axis=1) # still err
-        # Data['x_valid'] = Data['x_valid'][:,0:4096,:] # match len exactly
-        
-        
         self.Process_Args(args)
         self.Process_Data_To_Dataloaders(Data)
         
@@ -101,27 +82,6 @@ class Ribeiro_Classifier(Generic_Model):
             self.scale_multiplier = int(args['scale_multiplier'])
         else:
             self.scale_multiplier = 10
-            
-        # Scheduler now done in 'Generic_Model'
-        # if ('lr' in args.keys()):
-        #     self.batch_size = float(args['lr'])
-        # else:
-        #     self.lr = 0.001
-            
-        # if ('patience' in args.keys()):
-        #     self.patience = int(args['patience'])
-        # else:
-        #     self.patience = 7
-            
-        # if ('min_lr' in args.keys()):
-        #     self.min_lr = float(args['min_lr'])
-        # else:
-        #     self.min_lr = 1e-7
-            
-        # if ('lr_factor' in args.keys()): #help='reducing factor for the lr in a plateu (default: 0.1)')
-        #     self.lr_factor = float(args['lr_factor'])
-        # else:
-        #     self.lr_factor = 0.1
             
         # ... here we're going to hard-code net filter size, cause we can't get that from a set of strings
         self.net_filter_size = [64, 128, 196, 256, 320] #'filter size in resnet layers (default: [64, 128, 196, 256, 320]).'

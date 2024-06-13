@@ -1,7 +1,37 @@
-# Args expected:
-# args['spect']          # str, 'FFT' or 'Welch' queue up those transforms (after normalization and discretization, but before anything else)
+"""
+Generic_Model_PyCox is a Generic_Model modified to better fit PyCox models.
+
+Many Generic_Model functions are overwritten.
+
+Like Generic_Model, this provides generic functions that a specific_pycox_model might want to use
+
+# Additional args expected:
 # args['num_durations']  # int, how many discrete time points to use
 # args['pycox_mdl']      # str, which survival model to use. one of ['LH', 'MTLR', 'DeepHit','CoxPH']
+
+
+Does:
+- Fixes a bug in DeepHitSingle loss
+
+Samplers and Datasets:   
+- Custom_Sampler: a Sampler for a Dataloader that guarantees 1 positive case per batch
+- Dataset_FuncList: a Dataset that applies functions, from a list, to each sample, in order. Can return either X or (X,Y) 
+    Note:
+    - A DataLoader tells a Sampler to provide it with a list of indices. These go to a Dataset, which provides data. The Dataloader manages data batching and re-initializing Samplers when the epoch ends.
+    - PyCox handles its own training, so we never get to access a 'batch' of samples. Any changes we want to make to a data (e.g. normalization) have to be front-loaded (which wouldn't work for e.g. augmentation) or done per-sample by the 'Dataset'
+    - In retrospect, I probabaly should have had the "Dataset" return a "batch" and have the 'DataLoader' go with a "batch size" of one
+
+- Process_Args_PyCox: Runs Generic_Model.Process_Args(), then processes args generic to PyCox models
+- Prep_Data_Normalization_Discretization: prepares normalization AND discretization (3 of 4 PyCox models want 'time' to be an integer bin)
+- Process_Data_To_Dataloaders: Here, unlike Generic_Model, we front-load data normalizaiton. also front-loads discretization
+- Get_PyCox_Model: Loads the right PyCox model. wraps model.
+- Train: PyCox handles its own training, so we run that 1 epoch at a time.
+- Run_NN: Evaluates a PyCox model (during validation or testing)
+- Save_NN_PyCox: Saves all model components
+- Test: wraps Run_NN to return evaluation results
+
+"""
+
 
 import torch
 import torch.nn as nn
@@ -27,7 +57,6 @@ import pycox
 from pycox.models import LogisticHazard
 from pycox.models import MTLR
 from pycox.models import CoxPH # Bug on loss function if all events 0
-from pycox.models import CoxCC # no Idea how to set up dataloader
 from pycox.models import DeepHitSingle
 
 import pandas as pd
@@ -58,7 +87,7 @@ class Custom_Sampler(BatchSampler):
     Returns indicies s.t. at least one example of Event=1 per batch.
     ... And does that randomly, without replacement.
     ... Hobbled together from pytorch documentation.
-    This is re-created every epoch by the DataLoader
+    This is re-created differently every epoch by the DataLoader
     """
     def __init__(self, y_data, batch_size):
         # 1. figure out length
@@ -74,15 +103,15 @@ class Custom_Sampler(BatchSampler):
     def __iter__(self):
         if (self.default_order == False):
             
-            #3. Okay, now we're going to randomly sample from the entire dataset
+            #3. Start by shuffling the dataset
             Random_Indices = torch.multinomial(self.weights, self.num_samples, False)
             Num_Replacements_to_Prep = int(self.num_samples / self.batch_size) + 1
             
-            #4. And we're also going to generate ceil(num_samples / batch_size)
+            #4. Mark ceil(num_samples / batch_size) event cases that we can insert throughout this dataset to guarantee that each batch gets one positive case
             Replacement_Indices = torch.multinomial(torch.tensor([1.0 for k in self.Event_Inds]), Num_Replacements_to_Prep, True)
             Replacement_Indices = [self.Event_Inds[k] for k in Replacement_Indices]
             
-            #5. Parse the 30k random indices we chose. If at any point we don't see an event for batch_size indices in a row, replace a non-event index with an event idnex
+            #5. Parse the shuffled order. If at any point we don't see an event for batch_size indices in a row, replace the last (non-event) index with an event idnex
             Replace_With_Index = 0
             k=0
             while (k < self.num_samples):
@@ -95,16 +124,14 @@ class Custom_Sampler(BatchSampler):
        
             yield from iter(Random_Indices)
             
-        # sometimes we want to return non-randomly (evaluation)
+        # sometimes (evaluation) we just want to return the dataset without shuffling
         else:
             yield from range(self.num_samples)
 
     def __len__(self):
         return self.num_samples
         
-# %% Dataset Classes. PyCox needs everything frontloaded or done in the dataset (can't access the batch)
-# Dataset_FuncList_XY returns x,y after applying [functions] to x
-# Dataset_FuncList_X  returns x after applying [functions] to x
+# %% Dataset functions. PyCox needs everything either frontloaded or done by the dataset (can't access the batch after it's loaded to e.g. normalize the whole thing)
 
 class Dataset_FuncList(torch.utils.data.Dataset):
     # Applies functions in func_list, in order, to x, 
@@ -114,23 +141,21 @@ class Dataset_FuncList(torch.utils.data.Dataset):
     
     def __init__(self, data, targets = None, func_list= None, discretize = False, Toggle = 'XY'):
         self.data = data
-        
         if (targets is not None):
             if (discretize):
                 self.targets = torch.tensor(targets.astype(np.int64)) # must be tensor and integer IF DISCRETIZING
             else:
-                self.targets = torch.tensor(targets.astype(np.float64)) # must be tensor try not discretizing?
+                self.targets = torch.tensor(targets.astype(np.float64)) # must be tensor 
         else:
             self.targets = None
         self.func_list = func_list
-        self.Return_Toggle = Toggle # 'X' - return only X. 'XY' - return both. PyCox formats
+        self.Return_Toggle = Toggle # 'X' - return only X. 'XY' - return both in PyCox formats
 
     def __getitem__(self, index): 
-        if isinstance(index, slice): # ...LH fit requests 2 elements to check their sizes, as a slice... let's just do give it two samples?
-            return [1,2,3] # seems to work for now? might break something!
-            index = [0,1]
+        if isinstance(index, slice): # ... Only LH fit requests 2 elements as a slice... to check their size?
+            return [1,2,3] # couldn't actually get it to be happy with returning elements. This seems to work just fine
             
-        x = self.data[index] # if you ever modify this value, torch.clone it first (else permanent)
+        x = self.data[index] # pointer, if modifying, torch.clone first (else permanent)
         if (self.func_list is not None):
             x = torch.clone(x)
             for k in self.func_list:
@@ -139,20 +164,15 @@ class Dataset_FuncList(torch.utils.data.Dataset):
         if (self.Return_Toggle =='XY'):
             y = self.targets[index]
             return x, (y[0], y[1].to(torch.float32)) #must be tensor, (int64tensor if discretizing, else float32/64), float32tensor. Outputs as tuple.
-        
         if (self.Return_Toggle =='X'):
             return x, # must be a tensor, NEEDS A COMMA TO BE A TUPLE containing a tensor
     
     def __len__(self):
         return self.data.shape[0]
 
-
 def collate_fn(batch):
-    """Stacks the entries of a nested tuple"""
     return tt.tuplefy(batch).stack() # demands torch tensors
 
-
-# % **********************************
 # %%  ---------------- Start the model
 class Generic_Model_PyCox(Generic_Model):
 
@@ -162,8 +182,9 @@ class Generic_Model_PyCox(Generic_Model):
     
 # %% augment process_args, models should include this in init
     def Process_Args_PyCox(self, args):
-        self.Process_Args(args)
+        self.Process_Args(args) # call generic_model's arg processing
         
+        # now add a few that are generic to pycox models
         if ('num_durations' not in args.keys()):
             args['num_durations'] = '100'
             print('By default, using 100 time intervals')
@@ -201,7 +222,7 @@ class Generic_Model_PyCox(Generic_Model):
             self.labtrans.fit_transform(np.array([0,self.max_duration]), np.array([0,1]))
 
 
-# %% Overwrite Process_Data_To_Dataloaders
+# %% Overwrite Process_Data_To_Dataloaders from Generic_Model
 # This runs AFTER we have normalization and time discretization prepped from either init or load
 # The goal is to get everything ready for PyCox model training
 # 1) Prep which functions get called per image
@@ -257,7 +278,7 @@ class Generic_Model_PyCox(Generic_Model):
         return pycox_mdl
 
 
-# %% Overwrite Train
+# %% Overwrite Train from Generic_Model
     def Train(self):
         # store a copy of the best model available
         Best_Model = copy.deepcopy(self.model)
@@ -324,61 +345,34 @@ class Generic_Model_PyCox(Generic_Model):
                     if (len(val_perfs) - (np.argmin(val_perfs) + 1 ) ) >= self.early_stop:
                         # ^ add one: len_val_perfs is num trained epochs (starts at 1), but argmin starts at 0.
                         break
+                    
         self.model = copy.deepcopy(Best_Model)
         self.pycox_mdl.net = self.model
         return train_loss
 
-# %% Overwrite Load
+# %% Model Loading
     def Load(self, best_or_last):
-        
         print('load Should be overwritten in model file!')
         quit()
         
-        # Import_Dict = self.Load_Checkpoint(best_or_last)
-        # self.Load_Random_State(Import_Dict)
-        # self.Load_Training_Params(Import_Dict)
-        # self.Load_Training_Progress(Import_Dict)
-        # self.Load_Normalization(Import_Dict)
-
-        # # initialize model, update model shape, send to GPU, update weights, load optimizer and scheduler
-        # Actual_output_class_count = Import_Dict['model_state_dict']['fc.weight'].shape[0]
-        # self.model.fc = nn.Linear(in_features=512, out_features=Actual_output_class_count, bias=True)
-        # self.model.to(self.device)
-        # self.model.load_state_dict(Import_Dict['model_state_dict'])
-        # if ('optimizer_state_dict' in Import_Dict.keys()):
-        #     self.optimizer.load_state_dict(Import_Dict['optimizer_state_dict'])
-        # if ('scheduler_state_dict' in Import_Dict.keys()):
-        #     self.scheduler.load_state_dict(Import_Dict['scheduler_state_dict'])
-            
-        # # Now set up time discretization
-        # if ('max_duration' in Import_Dict.keys()):
-        #     num_durations = Actual_output_class_count
-        #     self.max_duration = Import_Dict['max_duration']
-        #     self.labtrans = LogisticHazard.label_transform(num_durations)
-        #     self.labtrans.fit_transform(np.array([0,self.max_duration]), np.array([0,1]))
-        # else:
-        #     print('cant discretize data')
-            
-        # # Now frontload normalization (CPU) and discretize times
-        # if (self.max_duration is not None):
-        #     self.Process_Data_To_Dataloaders()
-
+    # After we load a model, we might need to re-do discretization. Currently, this has no effect since we load the training data each time
     def Discretize_On_Load(self, Import_Dict):
         if ('max_duration' in Import_Dict.keys()):
-            if (self.Num_Classes > 1): # If we're loading an LH/MTLR/DeepHit model, overwrite duration count
+            if (self.Num_Classes > 1): # If we're loading an LH/MTLR/DeepHit model, overwrite number of discretization time steps
                 self.num_durations = self.Num_Classes
             self.max_duration = Import_Dict['max_duration']
             self.labtrans = LogisticHazard.label_transform(self.num_durations)
-            self.labtrans.fit_transform(np.array([0,self.max_duration]), np.array([0,1])) #dunno why, but it wanted more examples
+            self.labtrans.fit_transform(np.array([0,self.max_duration]), np.array([0,1])) 
         else:
-            print('cant discretize data')
+            print('cant discretize data on load')
+            exit()
             
-        # Now frontload normalization (CPU) and discretize times (ONLY if you haven't already - if Training, you have)!
-        if (self.max_duration is not None):
-            if ( ('Train' not in self.args.keys()) or (self.args['Train'] == 'False') ):
-                self.Process_Data_To_Dataloaders()
+        # If we _did_ want to process a new test set without loading the training set, we'd need to normalize/discretize the data after loading an existing model:
+        # if (self.max_duration is not None):
+        #     if ( ('Train' not in self.args.keys()) or (self.args['Train'] == 'False') ):
+        #         self.Process_Data_To_Dataloaders()
 
-# %% Overwrite Run, include output discretization from continuous models
+# %% Overwrite Run, include output discretization from continuous CoxPH model
     def Run_NN (self, my_dataloader):
 
         if (self.args['pycox_mdl'] == 'CoxPH'):
@@ -387,32 +381,30 @@ class Generic_Model_PyCox(Generic_Model):
         surv    = self.pycox_mdl.predict_surv(my_dataloader)
         surv_df = self.pycox_mdl.predict_surv_df(my_dataloader) # contains surv, also stores 'index' which is the time in years rather than discretized points
 
-        # for CoxPH you have to discretize time points
+        # for CoxPH you have to discretize time points manually
         if (self.args['pycox_mdl'] == 'CoxPH'):
             # survival (x) is probability that event occurs AFTER the current time point (surv[:,0] != 1)
-            # so ... we have 738 indices from train we want to map to 100 cuts
-            # ... but they only fall into 90 cut 'slots'
+            # but this is evaluated at every single TTE.
+            # ex: 738 TTEs that we want to map to 100 discrete times... but they only fall into 90 of them
             # So: 
             # parse columns of output: [large] x 100
             # parse columns of input: [large] x 738. 
             # input columns align with output columns via 't2': ex: array([ 1,  1,  2,  3,  6, 10, 10]). 90 unique values.
-            # where an input maps to an output, fill that in, if there's a gap, fill in prev known value
+            # where a time maps to a bin, fill that in, if there's a gap, fill in prev known value
             Unique_Time_Points = np.unique(self.Data['y_train'][:,0])
             t2, k = self.labtrans.transform(Unique_Time_Points, np.ones(Unique_Time_Points.shape))
             surv_out = np.ones( (my_dataloader.dataset.targets.shape[0],len(self.labtrans.cuts)), dtype=float)
             temp_col = surv[:,0]
-            for k in range(surv_out.shape[1]):  # parse output columns k
-                for i,m in enumerate(t2):       # parse input columns i
-                    if (m > k):                 # if i is associated with a later k, break loop
+            for k in range(surv_out.shape[1]):  # parse bins k
+                for i,m in enumerate(t2):       # parse TTEs m
+                    if (m > k):                 # if m is associated with a later k, look at next bin
                         break
-                    if (m==k):                  # if i is associated with k, remember input col
-                        temp_col = surv[:,i]    # [this repeats until we get the last input col associated with k]
+                    if (m==k):                  # if m maps to k, remember which column we looked at
+                        temp_col = surv[:,i]    # [this repeats until we get the TTE col associated with bin k]
                 surv_out[:,k] = temp_col       # after parsing all input columns m, we have the highest m <= k
 
             surv = surv_out
             t, d = self.labtrans.transform(my_dataloader.dataset.targets[:,0].numpy(),my_dataloader.dataset.targets[:,1].numpy())
-            
-            # surv transposed in df 5/25/24
             surv_df = pd.DataFrame(data = np.transpose(surv), columns = [k for k in range(surv.shape[0])], index = self.labtrans.cuts )
 
         # if not pycox, you already have t,d discretized in Data[]
@@ -444,9 +436,7 @@ class Generic_Model_PyCox(Generic_Model):
         else:
             cuts, t, d, surv, surv_df  = self.Run_NN(self.test_dataloader) # this is an UNSHUFFLED dataloader sent through TorchTuples (only output x, can't recover shufled y if shuffled)
         return cuts, t, d, surv, surv_df
-    
-# %% Overwrite Save
-    
+
 # %% Overwrite save
 def Save_NN_PyCox(epoch, model, path, best_performance_measure=9999999, optimizer=None, scheduler=None, NT=None, NM=None, NS=None, max_duration=None):
     # https://pytorch.org/tutorials/recipes/recipes/saving_and_loading_a_general_checkpoint.html

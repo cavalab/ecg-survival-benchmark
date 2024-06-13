@@ -1,48 +1,59 @@
+"""
+This is the framework for a generic model.
+
 # args['epoch_start']           int. defaults to 0
 # args['epoch_end']             int. defaults to -1 (no training)
 # args['validate_every']        int. defaults to 1
 # args['batch_size']            int. Size of batch. Defaults to 512
 # args['GPU_minibatch_limit']   int. Size of sub-batch sent to GPU. Defaults to 64. (gradients accumulate to batch_size)
-# args['Save_Out_Checkpoint']   'True' or not. defaults to 'True'. iff 'True', saves out checkpoints every epoch
+# args['Save_Out_Checkpoint']   'True' or not. defaults to 'True'. iff 'True', saves out model checkpoint after every epoch
 # args['Save_Out_Best']         'True' or not. defaults to 'True'. iff 'True', saves out best checkpoint after validation
-# args['Model_Folder_Path']     '<path>'. No default. Necessary.
-# args['Loss_Type']             'SSE' or 'CrossEntropyLoss' or 'wSSE' or 'SAE' or 'wSAE'. Defaults to 'SSE'. Generic_Model_PyCox uses its own loss.
+# args['Model_Folder_Path']     '<path>'. No default. Necessary. Passed from Runner scripts.
+# args['Loss_Type']             'SSE' or 'CrossEntropyLoss' or 'wSSE' or 'SAE' or 'wSAE'. Defaults to 'SSE'. Generic_Model_PyCox overwrites this.
 # args['early_stop]             int. defaults to -1. 
-# args['optimizer']             str. can be 'cocob' or 'adam'
+# args['optimizer']             str. only option, and default, here, is 'adam'
 # args['Adam_wd']               float. defaults to 0.01.
-# args['Scheduler']             'True' to set 1e-8 minimum rate (scheduler scales 1e-7 by 0.1x). Defaults to 1e-3 (scheduler scales default 1e-2 by 0.1x to get 1e-3 rate). mults rate by 0.1x if no val improvement in 10E. Stops early if at minimum
+# args['Scheduler']             'True' to set 1e-8 minimum learning rate (scheduler scales 1e-7 by 0.1x). Defaults to 1e-3 (scheduler scales default 1e-2 by 0.1x to get 1e-3 rate). mults rate by 0.1x if no val improvement in 10E. Stops early if at minimum
 
-# -*- coding: utf-8 -*-
-"""
-The idea is that this has many of the pieces of a generic model
-An actual model inherits from this class
-... and then uts something together faster
 
-# class Specific_Model(Generic_Model):
-    # def __init__(self, args, Data):
-        # self.Process_Args(args)
-        # //set up model, optimizer, scheduler, starting loss
-        # self.Process_Data_To_Dataloaders(Data)
-        # self.Prep_Normalization(args, Data)
-        # self.Prep_LossFunction(args, Data)
+Has generic functions, oriented around regressions/classifiers, to:
+    1) Processes passed args
+    2) Prepare normalization parameters (normalization is not front-loaded in this script, it is done per-batch during train/run)
+    3) Prepare loss functions
+    4) Initialize optimizers and schedulers
+    5) Prepare dataloaders 
+    6) Load: checkpoint, random state, best model, training parameters, training progress
+    6) Adjust inputs: one at a time and in a batch- these are placeholders and would be overwritten if a model needs data in e.g. a different shape than the N-C-H-W we're standardizing to
+    7) Train a model
+    8) Run a model on a dataloader
+    9) Storing training/validation performance
     
-    # def load(self, best_or_last):
-        # self.Load_Checkpoint(self, best_or_last)
-        # // initialize model, update model shape, send to GPU, update weights, load optimizer and scheduler
-        # self.Load_Random_State(self, Import_Dict)
-        # self.Load_Training_Params(self, Import_Dict)
-        # self.Load_Training_Progress(self, Import_Dict)
-        # self.Load_Normalization(self, Import_Dict)
+    
+A specific_model would look like this:
+    
+class Specific_Model(Generic_Model):
+    def __init__(self, args, Data):
+        self.Process_Args(args)
+        // process additional model-specific arguments
+        //set up model
+        self.Process_Data_To_Dataloaders(Data)
+        self.Prep_Normalization(args, Data)
+        self.Prep_LossFunction(args, Data)
+    
+    def load(self, best_or_last):
+        self.Load_Checkpoint(self, best_or_last)
+        // initialize model, update model shape, send to GPU, update weights, load optimizer and scheduler
+        self.Load_Random_State(self, Import_Dict)
+        self.Load_Training_Params(self, Import_Dict)
+        self.Load_Training_Progress(self, Import_Dict)
+        self.Load_Normalization(self, Import_Dict)
 
-Unresolved bugs: 
-    # run 2 epochs ! = save 1 epoch, load, run 1 epoch. 
+Unresolved bug: 
+    # train 2 epochs != train 1 epoch, save, load, train 1 epoch. 
     # the random state saved and loaded is correct
-    # ... it looks like dataloaders have their own states that need to be saved
-    # ... yeah, that's not implemented yet
+    # ... it looks like dataloaders that shuffle inputs have their own states that need to be saved
+    # ... that's not implemented yet
 
-Created on Sat Jan 20 12:26:03 2024
-
-@author: pxl28
 """
 
 import torch
@@ -68,18 +79,14 @@ from MODELS.Support_Functions import Get_Loss
         
 class Generic_Model:
     
-    def __init__(self):
+    def __init__(self): # doesn't automatically init; the specific_model should call/overwrite/extend the generic functions here
         pass
     
-    
-    
     # %% Init components
-    
     def Process_Args(self, args):
-        
         self.args = args
         
-        # *** Process Args
+        # CUDA
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print('Set to Run on ' + str(self.device))
         
@@ -162,9 +169,10 @@ class Generic_Model:
             else:
                 self.min_lr=1e-2 # scaled by 1e-1 later
 
+        # Model Folder Path
         self.model_folder_path = args['Model_Folder_Path']
         
-    
+    # %% Process Data
     def Process_Data_To_Dataloaders(self,Data):
         if 'x_train' in Data.keys():
             Data['x_train'] = Structure_Data_NCHW(Data['x_train'])

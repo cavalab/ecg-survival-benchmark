@@ -3,9 +3,8 @@
 This includes several functions that may overlap between models
 
 Many implementations are from online tutorials / stackexchange
-
-
 """
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -17,11 +16,10 @@ from pycox.evaluation import EvalSurv
 
 from sklearn.metrics import roc_auc_score
 from sklearn.metrics import average_precision_score
+import os, h5py
 
-# %%
-# Generic Dataset used by classifiers
+# %% Generic Dataset used by classifiers
 class Custom_Dataset(torch.utils.data.Dataset):
-    # import numpy as np
     def __init__(self, data, targets):
         self.data = data
         self.targets = targets
@@ -63,7 +61,7 @@ def Save_NN(epoch, model, path, best_performance_measure=9999999, optimizer=None
         Out_Dict['NS'] = NS # normalization stdev per channel
     torch.save(Out_Dict, path)
     
-# %% Save training args
+# %% Save training args to json
 def Save_Train_Args(path, train_args):
     import json
     with open(path, 'w') as file:
@@ -109,9 +107,7 @@ def Structure_Data_NCHW(arr):
 
 
 # %% Normalization
-# Want: Specify normalization as an arugment rather than per-model
-
-def Get_Norm_Func_Params (args, Some_Array):
+def Get_Norm_Func_Params (args, Some_Array): # figure out how to normalize (from train set)
     if ('Norm_Func' not in args.keys()):
         args['Norm_Func'] = 'nchW'
         print('By default, using nchW normalization')
@@ -136,7 +132,7 @@ def Get_Norm_Func_Params (args, Some_Array):
     return norm_type, u, s # these can be saved
 
 
-def Normalize (value, norm_type, u, s):
+def Normalize (value, norm_type, u, s): # apply normalization to a batch input (like a test set)
     # input: batch NCHW pytorch tensor [passed by ref]
     # output: modified cloned output
     if norm_type == 'No_Norm':
@@ -155,9 +151,7 @@ def Normalize (value, norm_type, u, s):
 
 
 # %% Loss Functions
-def Get_Loss_Params (args, Train_Y=None):
-    # Interprets args and saves out a dict with anything relevant for future loss calculations
-    
+def Get_Loss_Params (args, Train_Y=None): # figure out how to apply losses
     Loss_Params = {}
     if ('Loss_Type' in args.keys()):
         Loss_Params['Type'] = args['Loss_Type']
@@ -166,7 +160,7 @@ def Get_Loss_Params (args, Train_Y=None):
         print('Loss_Type not in args - exiting.')
         quit()
         
-    # if loss needs weoughts of 1/count, get weights. Modified from Ribeiro.
+    # if loss needs weights of 1/count, get weights. Modified from Ribeiro.
     if ( (Loss_Params['Type'] == 'wSSE') or (Loss_Params['Type']=='wSAE') ):
         unique_vals, counts = np.unique(Train_Y, return_counts=True)
         weights = 1 / counts
@@ -175,8 +169,7 @@ def Get_Loss_Params (args, Train_Y=None):
     return Loss_Params
         
 
-
-def Get_Loss(Model_Out, Correct_Out, Loss_Params):
+def Get_Loss(Model_Out, Correct_Out, Loss_Params): # Get a loss for a batch
 
     # Classifier losses
     if (Loss_Params['Type'] == 'CrossEntropyLoss'):
@@ -223,8 +216,7 @@ def get_surv_briercordance(disc_y_t, disc_y_e, surv_df, target_times, time_point
     # ... only at time_points (years) closest to target_times (years)
     # ... this necessarily requires forced right-censoring at target_times < max (time_points)
     
-
-    # we're requesting performance at times, but we need the time points corresponding to those times
+    # we're requesting performance at times (yr), but we need the time points(index) corresponding to those times
     right_censor_time_point_list = []
     for k in target_times:
         a = np.argmin( abs(time_points - k))
@@ -236,7 +228,7 @@ def get_surv_briercordance(disc_y_t, disc_y_e, surv_df, target_times, time_point
     chance_at_censored_point  = -1 * np.ones(time_points.shape)
 
     for time_point in right_censor_time_point_list: 
-        if time_point == 0: # scores are not defined at '0' mark becaues nothing has happened yet
+        if time_point == 0: # scores are not defined at '0' 
             continue
         
         # otherwise, right-censor and measure 
@@ -309,28 +301,21 @@ def get_AUROC_AUPRC(disc_y_t, disc_y_e, surv, target_times, time_points):
 
     
     
-# %% Utility: append to existing hdf5 file
+# %% Utility: append variable to existing hdf5 file
 def Save_to_hdf5(path, var, var_name):
-    import os, h5py
-    
     # if hdf5 file DNE, make it
     # add variable that file, overwriting past entries
-    
-    exists = os.path.isfile(path)
-    if (exists == False):
+    if (os.path.isfile(path) == False):
         with h5py.File(path, "w") as f:
             f.create_dataset(var_name, data = var)
             print('saved ' + var_name)
     else:
         with h5py.File(path, "r+") as f:
-            
             database_list = [k for k in f.keys()]
-            
             if var_name in database_list:
                 tmp = f[var_name]
                 tmp = var
                 print('updated ' + var_name)
-                
             else:
                 f.create_dataset(var_name, data = var)
                 print('saved ' + var_name)

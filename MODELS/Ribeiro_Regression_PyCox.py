@@ -1,4 +1,10 @@
-# args['kernel_size']    - int. defaults to 17, must be odd.
+# Ribeiro_Regression_PyCox is a Generic_Model_PyCox, which in turn is a Generic_Model
+# args['Norm_Func'] defaults to 'None'
+# args['seq_length'] defaults to 4096
+# args['sample_freq'] defaults to 400Hz
+# args['scale_multiplier'] defaults to 10 (all inputs are scaled by 10)
+# args['dropout_rate'] defaults to 0.8
+# args['kernel_size'] defaults to 17
 
 # Originally from https://github.com/antonior92/ecg-age-prediction
 # Heavily modified by PVL to line up with the rest of the survival modeling flow

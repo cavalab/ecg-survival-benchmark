@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """
+Functions for InceptionTime Models
+
 # adapted from
 # https://github.com/TheMrGhostman/InceptionTime-Pytorch/commit/2a1b81d82b624c9033e73a2e7ee9bba2414217ef
 # where possible, original code and comments were kept

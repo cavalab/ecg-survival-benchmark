@@ -1,3 +1,5 @@
+# InceptionTImeClassifier is a Generic_Model
+# args['Loss Type'] defaults to CrossEntropyLoss
 # adapted from
 # https://github.com/TheMrGhostman/InceptionTime-Pytorch/commit/2a1b81d82b624c9033e73a2e7ee9bba2414217ef
 # Heavily modified by PVL to line up with the rest of the survival modeling flow
