@@ -5,9 +5,8 @@ And saves out processed data (Numpy Arrays) for downstream work to ./RAW_DATA/Co
 
 
 It also works for data subsets (if you only include several "exams_part{N}.hdf5" of code15)
+[Likely has pieces borrowed from stackoverflow or online tutorials]
 """
-
-
 print('this version of the script only keeps ECG entries with TTE and E explicitly stated (none are inferred)')
 
 import numpy as np
@@ -15,22 +14,47 @@ import h5py
 import os
 import csv
 import time
-
 import torch # to set manual seed
 from torch.utils.data import random_split
 
-import collections
-collections.Callable = collections.abc.Callable
+# Uncomment next two lines to run from e.g. Spyder
+# import collections
+# collections.Callable = collections.abc.Callable
 
+#%% Data directories
+Code15_ECG_Directory = os.path.join(os.getcwd(),'RAW_DATA','Code15','TRAIN')
+Code15_exams_loc = os.path.join(os.getcwd(),'RAW_DATA','Code15','exams.csv')
+
+
+Out_Path_Train = os.path.join(os.getcwd(),'RAW_DATA','Code15_Processed', 'TRAIN_DATA')
+Out_Path_Test  = os.path.join(os.getcwd(),'RAW_DATA','Code15_Processed', 'TEST_DATA')
+
+
+Temp = os.path.join(os.getcwd(),'RAW_DATA','Code15_Processed')
+if (os.path.exists(Temp) == False):
+    os.mkdir(Temp)
+    
+Temp = os.path.join(os.getcwd(),'RAW_DATA','Code15_Processed','TRAIN_DATA') 
+if (os.path.exists(Temp) == False):
+    os.mkdir(Temp)
+    
+Temp = os.path.join(os.getcwd(),'RAW_DATA','Code15_Processed','TEST_DATA')
+if (os.path.exists(Temp) == False):
+    os.mkdir(Temp)
+
+
+
+
+# %% 
 # Grab data placed in 'train' folder
 train_exam_id = []
 train_tracings = []
-for f in os.listdir(os.path.join(os.getcwd(),'RAW_DATA','Code15','TRAIN')): # load all hdf5
+for f in os.listdir(Code15_ECG_Directory): # load all hdf5
     print(f)
-    with h5py.File(os.path.join(os.getcwd(),'RAW_DATA','Code15','TRAIN',f), "r") as f:
-        print("Keys: %s" % f.keys())
-        exam_id = f['exam_id'][()]
-        tracings = f['tracings'][()]
+    with h5py.File(os.path.join(Code15_ECG_Directory,f), "r") as h:
+        print("Keys: %s" % h.keys())
+        exam_id = h['exam_id'][()]
+        tracings = h['tracings'][()]
         train_exam_id.append(exam_id[:-1])        # the last one is just '0'
         # print(tracings[-1])
         train_tracings.append(tracings[:-1])      # ... so cut it
@@ -42,7 +66,7 @@ del tracings
 del train_tracings
     
 # and now grab the csv
-with open(os.path.join(os.getcwd(),'RAW_DATA','Code15','exams.csv')) as f:
+with open(Code15_exams_loc) as f:
     reader = csv.reader(f, delimiter=",")   
     Values = np.array(list(reader))
     f.close()
@@ -148,20 +172,7 @@ for i,k in enumerate(column_names):
     print (i,k)
 
 # %% Now save out the training data and testing data as numpy arrays
-Temp = os.path.join(os.getcwd(),'RAW_DATA','Code15_Processed')
-if (os.path.exists(Temp) == False):
-    os.mkdir(Temp)
-    
-Temp = os.path.join(os.getcwd(),'RAW_DATA','Code15_Processed','TRAIN_DATA') 
-if (os.path.exists(Temp) == False):
-    os.mkdir(Temp)
-    
-Temp = os.path.join(os.getcwd(),'RAW_DATA','Code15_Processed','TEST_DATA')
-if (os.path.exists(Temp) == False):
-    os.mkdir(Temp)
 
-Out_Path_Train = os.path.join(os.getcwd(),'RAW_DATA','Code15_Processed', 'TRAIN_DATA')
-Out_Path_Test  = os.path.join(os.getcwd(),'RAW_DATA','Code15_Processed', 'TEST_DATA')
 
 with h5py.File(os.path.join(Out_Path_Train,'Train_Data.hdf5'), "w") as f:
     f.create_dataset('column_names', data = column_names)
