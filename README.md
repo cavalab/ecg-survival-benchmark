@@ -2,17 +2,17 @@
 
 
 ## Quick Start
-Build a singularity container from Sing_Torch_05032024.def
+Build a singularity container from `Sing_Torch_05032024.def`
 
 Minimal Code-15 data:
-Go to       https://zenodo.org/records/4916206
-Download    exams.csv                                  to ./RAW_DATA/Code15/exams.csv
-Download    exams_part0.hdf5                           to ./RAW_DATA/Code15/TRAIN/exams_part0.hdf5
-Run         ./RAW_DATA/Code15_ECG_Process_8020.py      with os.getcwd() as ./ 
-Move        ./RAW_DATA/Code15_Processed                to ./HDF5_DATA/Code15
----
-Open 	    model_runner_caller.py
-Run         top section
+
+- Go to       https://zenodo.org/records/4916206
+- Download    `exams.csv`                                  to `./RAW_DATA/Code15/exams.csv`
+- Download    exams_part0.hdf5                           to ./RAW_DATA/Code15/TRAIN/exams_part0.hdf5
+- Run         ./RAW_DATA/Code15_ECG_Process_8020.py      with os.getcwd() as ./ 
+- Move        ./RAW_DATA/Code15_Processed                to ./HDF5_DATA/Code15
+- Open 	    model_runner_caller.py
+- Run         top section
 
 You should see:
 1) a model appear in ./Trained Models/
