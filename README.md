@@ -66,6 +66,7 @@ Kaplan-Meier and histogram Survival Functions can be made by adapting Gen_KM_Cur
 We include Job_File_Maker_SurvClass and Job_File_Maker_PyCox - these generate job files in our institution's format, but can be adapted to yours.
 To generate job files based on trained models, use Job_File_Maker_From_Summary.py, after summarizing trained models with Summarize_Trained_Models.py
 Job_File_Maker_From_Summary.py can be adapted to add / remove / change model runner arguments (ex: switch the evaluation dataset)
+In our paper, models were trained with random seeds 10-14. Data was split with random seed 12345.
 
 ---
 Model_Runner_SurvClass/PyCox: Everything is interpreted via a series of string-string argument-value pairs. Arguments must begin with "--" and be separated by spaces. These are turned into a dictionary mapping arguments to values.

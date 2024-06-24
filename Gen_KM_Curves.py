@@ -2,7 +2,6 @@
 """
 Created on Sat May 25 20:44:10 2024
 
-@author: CH242985
 """
 
 import os
