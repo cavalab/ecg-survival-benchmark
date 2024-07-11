@@ -1,6 +1,6 @@
 # ecg-survival-benchmark
 
-This is a set of scripts for modeling patient mortality for the Code-15 and MIMIC-IV datasets.
+This is a set of scripts for modeling patient mortality for the Code-15 and MIMIC-IV datasets in support of https://arxiv.org/abs/2406.17002
 The scripts include data processing, model building (deep survival models and classifiers), survival function building (for classifiers), and evaluating models to .csv files.
 We use PyCox deep survival models (LH, MTLR, CoxPH (DeepSurv), and DeepHit).
 We also implement classifiers predicting mortality by a time horizon (e.g. --horizon 10.0), assuming censored patients survive, and then feed those classifiers through Cox regressions.
