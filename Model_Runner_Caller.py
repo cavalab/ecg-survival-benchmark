@@ -50,7 +50,7 @@ args += ' --y_col_test_time 3'               # <- these depend on the data forma
 args += ' --y_col_test_event 4'              # 
 args += ' --Rand_Seed 13'                    # Random seed
 args += ' --horizon 10.0'                    # What time (years) models should try to optimize for [Classifier specific]
-args += ' --normalize nchW'                  # Normalize ECG per channel based on the training data set
+args += ' --Norm_Func nchW'                  # Normalize ECG per channel based on the training data set
 
 
 args = args.split(' ')
