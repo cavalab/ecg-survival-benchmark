@@ -43,6 +43,7 @@ def Save_NN(epoch, model, path, best_performance_measure=9999999, optimizer=None
     Out_Dict['model_state_dict'] = model.state_dict()
     Out_Dict['Numpy_Random_State'] = np.random.get_state()
     Out_Dict['Torch_Random_State'] = torch.get_rng_state()
+    Out_Dict['CUDA_Random_State'] = torch.cuda.get_rng_state()
     Out_Dict['best_performance_measure'] = best_performance_measure
     
     if (optimizer is not None):

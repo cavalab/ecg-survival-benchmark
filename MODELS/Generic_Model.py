@@ -252,6 +252,7 @@ class Generic_Model:
             if ('Torch_Random_State' in Import_Dict.keys()):
                 np.random.set_state(Import_Dict['Numpy_Random_State'])
                 torch.random.set_rng_state(Import_Dict['Torch_Random_State'])
+                torch.cuda.random.set_rng_state(Import_Dict['CUDA_Random_State'])
                 torch.backends.cudnn.deterministic = True # make TRUE if you want reproducible results (slower)
             else:
                 print('Could not load random state')
