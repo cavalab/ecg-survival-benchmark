@@ -87,6 +87,8 @@ from MODELS.Support_Functions import Save_to_hdf5
 from MODELS import Support_Functions
 from MODELS import InceptionTimeRegression_PyCox
 from MODELS import Ribeiro_Regression_PyCox
+from MODELS import LSTMReg_PyCox
+from MODELS import TimesNetReg_PyCox
 
 import h5py
 import numpy as np
@@ -169,13 +171,16 @@ def Run_Model(args):
     
     # %% 2. Data load - NeurIPS simplified. Assume we are pulling from 'train_folder' and 'test_folder'
     Data = {}
-    with h5py.File(os.path.join(os.getcwd(),'HDF5_DATA',args['Train_Folder'],'TRAIN_DATA','Train_Data.hdf5'), "r") as f:
+    datapath1 = os.path.dirname(os.getcwd()) # cleverly jump one one folder without referencing \\ (windows) or '/' (E3)
+    with h5py.File(os.path.join(datapath1,'HDF5_DATA',args['Train_Folder'],'TRAIN_DATA','Train_Data.hdf5'), "r") as f:
         Data['x_train'] = f['x'][()]
         Data['y_train'] = f['y'][()]
     
-    with h5py.File(os.path.join(os.getcwd(),'HDF5_DATA',args['Test_Folder'],'TEST_DATA','Test_Data.hdf5'), "r") as f:
+    with h5py.File(os.path.join(datapath1,'HDF5_DATA',args['Test_Folder'],'TEST_DATA','Test_Data.hdf5'), "r") as f:
         Data['x_test'] = f['x'][()]
         Data['y_test'] = f['y'][()] 
+        
+    print('Loaded Train and Test. Total time elapsed: ' + str(time.time()-start_time) )
     
     # %% 3.1 Data clean
     # Sometimes time-to-event is '-1.0' meaning no follow up time.
@@ -189,11 +194,17 @@ def Run_Model(args):
             neg_inds = np.where(Data[key][:,int(args['y_col_train_time'])] < 0)[0]
             inds_to_del = neg_inds.tolist()
             
-            # mark nan traces
-            nan_inds = np.where(np.sum(np.sum(np.isnan(Data[x_key]),axis=2),axis=1) > 0)[0]
-            for k in nan_inds:
-                if k not in inds_to_del:
-                    inds_to_del.append(k)
+            # mark nan traces (5x faster)
+            for i in range(Data[x_key].shape[0]):
+                if (np.isnan(Data[x_key][i]).any()):
+                    if i not in inds_to_del:
+                        inds_to_del.append(i)
+                        
+            # mark nan traces (pre 8/14/24)
+            # nan_inds = np.where(np.sum(np.sum(np.isnan(Data[x_key]),axis=2),axis=1) > 0)[0]
+            # for k in nan_inds:
+            #     if k not in inds_to_del:
+            #         inds_to_del.append(k)
                      
             # remove data, avoid calling np.delete on Data cause that doubles RAM - just select the indices to keep instead
             if (len(inds_to_del) > 0):
@@ -201,6 +212,8 @@ def Run_Model(args):
                 inds_to_keep = np.delete( np.arange(Data[key].shape[0]), inds_to_del )
                 Data[x_key] = Data[x_key][inds_to_keep] 
                 Data[key] = Data[key][inds_to_keep] 
+                
+    print('Checked data for negative time and nan ECG. Total time elapsed: ' + str(time.time()-start_time) )                
             
     # %% 3.2 Backupdata labels for evaluation 
     Data_Y_Backup = {}
@@ -228,25 +241,40 @@ def Run_Model(args):
         # Per ID, find matching data rows      
         Subj_IDs = Data_Y_Backup['y_train'][:,0]            
         Subj_IDs_Unique = np.unique(Subj_IDs)
+        
+        #Speedup 08/14/24
         Subj_ID_to_Rows_Dict = {} # map ID to rows
-        for k in Subj_IDs_Unique:
-            Subj_ID_to_Rows_Dict[k] = np.where(Subj_IDs == k)[0] 
+        for ind,val in enumerate(Subj_IDs):
+            if val in Subj_ID_to_Rows_Dict.keys():
+                Subj_ID_to_Rows_Dict[val].append(ind)
+            else:
+                Subj_ID_to_Rows_Dict[val] = [ind]
+                
+        # Subj_ID_to_Rows_Dict = {} # map ID to rows
+        # for k in Subj_IDs_Unique:
+        #     Subj_ID_to_Rows_Dict[k] = np.where(Subj_IDs == k)[0] 
 
         # Split
         Train_Inds, Val_Inds, Test_Inds = Support_Functions.Data_Split_Rand( [k for k in range(len(Subj_IDs_Unique))], TR, VA, TE)
 
         # Okay, now that we've split unique patient IDs we need to convert that back to ECG rows
-        Train_Inds_ECG = []
-        for k in Train_Inds:
-            Train_Inds_ECG = Train_Inds_ECG + [ m for m in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[k]] ]
-            
-        Val_Inds_ECG = []
-        for k in Val_Inds:
-            Val_Inds_ECG = Val_Inds_ECG + [ m for m in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[k]] ]
-            
-        Test_Inds_ECG = []
-        for k in Test_Inds:
-            Test_Inds_ECG = Test_Inds_ECG + [ m for m in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[k]] ]
+        # Train_Inds_ECG = []
+        # for k in Train_Inds:
+        #     Train_Inds_ECG = Train_Inds_ECG + [ m for m in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[k]] ]
+        # Faster equivalent. 0.05s instead of 213.
+        Train_Inds_ECG  = [Row for PID in Train_Inds for Row in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[PID]] ]
+        
+        # Val_Inds_ECG = []
+        # for k in Val_Inds:
+        #     Val_Inds_ECG = Val_Inds_ECG + [ m for m in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[k]] ]
+        # Faster Equivalent
+        Val_Inds_ECG  = [Row for PID in Val_Inds for Row in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[PID]] ]
+        
+        # Test_Inds_ECG = []
+        # for k in Test_Inds:
+        #     Test_Inds_ECG = Test_Inds_ECG + [ m for m in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[k]] ]
+        # Faster Equivalent
+        Test_Inds_ECG = [Row for PID in Test_Inds for Row in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[PID]] ]
         
         Train_Inds = Train_Inds_ECG
         Val_Inds = Val_Inds_ECG
@@ -263,6 +291,8 @@ def Run_Model(args):
           
     else:
         print('No Data Split')
+        
+    print('Split Train into Train/Valid. Total time elapsed: ' + str(time.time()-start_time) )                
             
     # %% 5. set up trained model folders if they  don't exist
 
@@ -313,6 +343,10 @@ def Run_Model(args):
         asdf = InceptionTimeRegression_PyCox.InceptionTimeRegression_PyCox(args, Data)
     if (Model_Type == 'RibeiroReg'):
         asdf = Ribeiro_Regression_PyCox.Ribeiro_Regression_PyCox(args, Data)
+    if (Model_Type == 'LSTMReg'):
+        asdf = LSTMReg_PyCox.LSTMReg_PyCox(args, Data)
+    if (Model_Type == 'TimesNetReg'):
+        asdf = TimesNetReg_PyCox.TimesNetReg_PyCox(args, Data)
       
         
     print('Got to Train. Total time elapsed: ' + str(time.time()-start_time) )
@@ -339,9 +373,7 @@ def Run_Model(args):
         else:
             cuts, disc_y_t, disc_y_e, surv, surv_df = asdf.Test() 
             
-        sample_time_points = cuts
-        outputs_hdf5_path = os.path.join(temp_path, 'Surv_Outputs.hdf5')
-        Save_to_hdf5(outputs_hdf5_path, sample_time_points, 'sample_time_points')
+        sample_time_points = cuts # where are we sampling the survival functions?
         
         # PyCox assumes test datasets aren't discretized, but we've discretized them, so adjust surv_df (affects concordance measures later)
         surv_df.index = np.arange(num_durations)
@@ -434,7 +466,7 @@ def Run_Model(args):
         print('Finished KM bootstraps. Starting all-ECG Brier and Concordance Total time elapsed: ' + str(time.time()-start_time) )
         
         # %% 6. Concordance and IPCW Brier Score across all ECGs
-        concordance_store_all_ecg, ipcw_brier_store_all_ecg, chance_at_censored_point_all_ecg  = get_surv_briercordance(disc_y_t, disc_y_e, surv_df, [1,2,5,10], cuts)
+        concordance_store_all_ecg, ipcw_brier_store_all_ecg, chance_at_censored_point_all_ecg  = get_surv_briercordance(disc_y_t, disc_y_e, surv_df, [1,2,5,10,999], cuts)
 
         Save_to_hdf5(outputs_hdf5_path, concordance_store_all_ecg, 'concordance_store_all_ecg')
         Save_to_hdf5(outputs_hdf5_path, ipcw_brier_store_all_ecg, 'ipcw_brier_store_all_ecg')
@@ -479,7 +511,7 @@ def Run_Model(args):
                     Inds[i] = tmp[np.random.randint(0,len(tmp))] # if there are multiple options, pick a random one
     
             # measure concrodance, brier, and record 'chance' (% of cases recording a mortality by time T, ignoring censoring)
-            concordance_score, ipcw_brier_score, chance_at_censored_point  = get_surv_briercordance(disc_y_t[Inds], disc_y_e[Inds], surv_df.iloc[:,Inds], [1,2,5,10], cuts)
+            concordance_score, ipcw_brier_score, chance_at_censored_point  = get_surv_briercordance(disc_y_t[Inds], disc_y_e[Inds], surv_df.iloc[:,Inds], [1,2,5,10,999], cuts)
 
             bootstrap_briers.append(ipcw_brier_score)
             bootstrap_concordances.append(concordance_score)
@@ -520,6 +552,7 @@ def Run_Model(args):
         np.savetxt(hist_path, temp, header=headers, delimiter = ',')
         
         print('Finished evaluation. Total time elapsed: ' + str(time.time()-start_time) )
+        
         
     #%% Test?
 if __name__ == '__main__':

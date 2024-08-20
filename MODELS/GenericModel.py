@@ -9,7 +9,7 @@ This is the framework for a generic model.
 # args['Save_Out_Checkpoint']   'True' or not. defaults to 'True'. iff 'True', saves out model checkpoint after every epoch
 # args['Save_Out_Best']         'True' or not. defaults to 'True'. iff 'True', saves out best checkpoint after validation
 # args['Model_Folder_Path']     '<path>'. No default. Necessary. Passed from Runner scripts.
-# args['Loss_Type']             'SSE' or 'CrossEntropyLoss' or 'wSSE' or 'SAE' or 'wSAE'. Defaults to 'SSE'. Generic_Model_PyCox overwrites this.
+# args['Loss_Type']             'SSE' or 'CrossEntropyLoss' or 'wSSE' or 'SAE' or 'wSAE'. Defaults to 'SSE'. GenericModelPyCox overwrites this.
 # args['early_stop]             int. defaults to -1. 
 # args['optimizer']             str. only option, and default, here, is 'adam'
 # args['Adam_wd']               float. defaults to 0.01.
@@ -76,8 +76,13 @@ from MODELS.Support_Functions import Get_Norm_Func_Params
 from MODELS.Support_Functions import Normalize
 from MODELS.Support_Functions import Get_Loss_Params
 from MODELS.Support_Functions import Get_Loss
+
+# LSTM support functions
+# from MODELS.Support_Functions import CustomDatasetLSTM
+# from MODELS.Support_Functions import CustomSamplerLSTM
+# from MODELS.Support_Functions import Custom_Collate_LSTM
         
-class Generic_Model:
+class GenericModel:
     
     def __init__(self): # doesn't automatically init; the specific_model should call/overwrite/extend the generic functions here
         pass
@@ -95,7 +100,7 @@ class Generic_Model:
             self.optimizer_name = str(args['optimizer'])
         else:
             self.optimizer_name = 'Adam'
-            print('By default, using adam optimizer')
+            print('GenericModel: By default, using adam optimizer')
 
         if (self.optimizer_name == 'Adam'):
             if ('Adam_wd' in args.keys()):
@@ -108,59 +113,59 @@ class Generic_Model:
             self.epoch_start = int(args['epoch_start'])
         else:
             self.epoch_start = 0
-            print('By default, starting at epoch 0')
+            print('GenericModel: By default, starting at epoch 0')
             
         if ('epoch_end' in args.keys()):
             self.epoch_end = int(args['epoch_end'])
         else:
             self.epoch_end = -1
-            print('By default, ending after 0 training epochs')
+            print('GenericModel: By default, ending after 0 training epochs')
             
         if ('validate_every' in args.keys()):
             self.validate_every = int(args['validate_every'])
         else:
             self.validate_every = 1
-            print('By default, validating every epoch')
+            print('GenericModel: By default, validating every epoch')
             
         if ('early_stop' in args.keys()):
             self.early_stop = int(args['early_stop'])
         else:
             self.early_stop = -1
-            print('By default, no early stopping (args[early_stop]=-1)')
+            print('GenericModel: By default, no early stopping (args[early_stop]=-1)')
             
         # Batch Size
         if ('batch_size' in args.keys()):
             self.batch_size = int(args['batch_size'])
         else:
             self.batch_size = 512
-            print('By default, using batch size of 512')
+            print('GenericModel: By default, using batch size of 512')
             
         if ('GPU_minibatch_limit' in args.keys()):
             self.GPU_minibatch_limit = int(args['GPU_minibatch_limit'])
         else:
             self.GPU_minibatch_limit = 128
-            print('By default, using GPU split-batch limit of 128')
+            print('GenericModel: By default, using GPU split-batch limit of 128')
 
         if (self.batch_size % self.GPU_minibatch_limit !=0):
-            print('GPU_minibatch_limit size not factor of batch size! adjust!')
+            print('GenericModel: GPU_minibatch_limit size not factor of batch size! adjust!')
             
         # Run Params
         if ('Save_Out_Checkpoint' in args.keys()):
             self.Save_Out_Checkpoint = (args['Save_Out_Checkpoint'] == 'True')
         else:
             self.Save_Out_Checkpoint = True
-            print('By default, checkpointing model')
+            print('GenericModel: By default, checkpointing model')
             
         if ('Save_Out_Best' in args.keys()):
             self.Save_Out_Best = (args['Save_Out_Best'] == 'True')
         else:
             self.Save_Out_Best = True
-            print('By default, Saving out best validation model')
+            print('GenericModel: By default, Saving out best validation model')
             
         # Scheduler
         if ('Scheduler' not in args.keys()):
             args['Scheduler'] = 'None'
-            print('By default, No Scheduler')
+            print('GenericModel: By default, No Scheduler')
             self.min_lr = 1e-2 # scaled by 1e-1 later
             
         else:
@@ -168,34 +173,60 @@ class Generic_Model:
                 self.min_lr = 1e-7 # scaled by 1e-1 later
             else:
                 self.min_lr=1e-2 # scaled by 1e-1 later
+                
+                
+        # Is this an lstm?
+        self.LSTM = False
+        if ('LSTM' in args.keys()):
+            if args['LSTM'] == 'True':
+                self.LSTM = True
+            
 
         # Model Folder Path
         self.model_folder_path = args['Model_Folder_Path']
         
-    # %% Process Data
-    def Process_Data_To_Dataloaders(self,Data):
-        if 'x_train' in Data.keys():
-            Data['x_train'] = Structure_Data_NCHW(Data['x_train'])
-            Data['y_train']  = np.float32(Data['y_train']) 
-            self.train_dataset = Custom_Dataset(Data['x_train'] , Data['y_train'])
-            self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset, batch_size = self.GPU_minibatch_limit, shuffle = True) # weighted sampler is mutually exclussive with shuffle = True
-            self.train_dataloader_unshuffled = torch.utils.data.DataLoader(self.train_dataset, batch_size = self.GPU_minibatch_limit, shuffle = False) # weighted sampler is mutually exclussive with shuffle = True
-
-        if 'x_valid' in Data.keys():
-            Data['x_valid'] = Structure_Data_NCHW(Data['x_valid'])
-            Data['y_valid']  = np.float32(Data['y_valid']) 
-            self.val_dataset  = Custom_Dataset(Data['x_valid']  , Data['y_valid'] )
-            self.val_dataloader = torch.utils.data.DataLoader (self.val_dataset,  batch_size = self.GPU_minibatch_limit, shuffle = False) #DO NOT SHUFFLE
         
-        if 'x_test' in Data.keys():
-            Data['x_test'] = Structure_Data_NCHW(Data['x_test'])
-            Data['y_test']  = np.float32(Data['y_test']) 
-            self.test_dataset  = Custom_Dataset(Data['x_test']  , Data['y_test'] )
+        # Prep training parameters (that can be overwritten by load() )
+        self.Val_Best_Loss = 9999999
+        self.Perf = []
+        
+    # %% Process Data - normalize, convert to tensors
+    def Prep_Dataloaders_and_Normalize_Data(self):
+        a = time.time()
+        if 'x_train' in self.Data.keys():
+            self.Data['x_train']  = Structure_Data_NCHW(self.Data['x_train'])
+            self.Data['x_train']  = Normalize(torch.Tensor(self.Data['x_train']), self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
+            self.Data['y_train']  = np.float64(self.Data['y_train']) #8/6/24
+            self.train_dataset = Custom_Dataset( self.Data['x_train'] , self.Data['y_train'])
+            self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset, batch_size = self.GPU_minibatch_limit, shuffle = True) # weighted sampler is mutually exclussive with shuffle = True
+            
+        if 'x_valid' in self.Data.keys():
+            self.Data['x_valid']  = Structure_Data_NCHW(self.Data['x_valid'])
+            self.Data['x_valid']  = Normalize(torch.Tensor(self.Data['x_valid']), self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
+            self.Data['y_valid']  = np.float64(self.Data['y_valid']) #8/6/24
+            self.val_dataset = Custom_Dataset(self.Data['x_valid']  , self.Data['y_valid'] )
+            self.val_dataloader = torch.utils.data.DataLoader (self.val_dataset,  batch_size = self.GPU_minibatch_limit, shuffle = False) #DO NOT SHUFFLE
+
+        if 'x_test' in self.Data.keys():
+            self.Data['x_test'] = Structure_Data_NCHW(self.Data['x_test'])
+            self.Data['x_test']  = Normalize(torch.Tensor(self.Data['x_test']), self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
+            self.Data['y_test']  = np.float64(self.Data['y_test']) #8/6/24
+            self.test_dataset  = Custom_Dataset(self.Data['x_test']  , self.Data['y_test'] )
             self.test_dataloader = torch.utils.data.DataLoader (self.test_dataset,  batch_size = self.GPU_minibatch_limit, shuffle = False) #DO NOT SHUFFLE
-    
-    def Prep_Normalization(self, args, Data):
+        print('GenericModel: Dataloader prep T = ', time.time() - a)
+
+
+    def prep_normalization_and_reshape_data(self, args, Data):
+        a = time.time()
+        self.Data = Data
+        # need to reshape x_train now that we're frontloading normalization
+        self.Data['x_train'] = Structure_Data_NCHW(self.Data['x_train'])
+        
         if 'x_train' in Data.keys():            
             self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev = Get_Norm_Func_Params(args, Data['x_train'])
+        else:
+            print('Cant prep normalization')
+        print('GenericModel: Train Data reshape and normalization prep T = ', time.time() - a)
 
     def Prep_LossFunction(self, args, Data):
         if 'y_train' in Data.keys():     
@@ -206,20 +237,19 @@ class Generic_Model:
             args['Loss_Type'] = 'SSE'
             print ('By default, using SSE loss')
             self.Loss_Params = Get_Loss_Params(args) 
-            
+
     def Prep_Optimizer_And_Scheduler(self):
         
         if (self.optimizer_name == 'cocob'):
             from parameterfree import COCOB
             self.optimizer = COCOB(self.model.parameters(),weight_decay = self.cocob_wd) 
         else:
-            print('By default, using optimizer: AdamW 1e-3')
+            print('GenericModel: By default, using optimizer: AdamW 1e-3')
             self.optimizer = torch.optim.AdamW(self.model.parameters(), lr = 1e-3, weight_decay = self.Adam_wd)
             
             # add the ribeiro scheduler (ineffective unless args['Scheduler'] == 'True')
             self.patience = 10
             self.lr_factor = 0.1
-            # self.min_lr = 1e-7 # implemented in start
             self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, patience=self.patience,
                                                              min_lr=self.lr_factor * self.min_lr,
                                                              factor=self.lr_factor)
@@ -274,7 +304,9 @@ class Generic_Model:
         csv_file_path = os.path.join(self.model_folder_path, 'Training_Progress.csv')
         if (os.path.isfile(csv_file_path)):
             self.Perf = np.genfromtxt(csv_file_path, skip_header=1, delimiter=",") # top row is header, so skip
-            self.Perf = [self.Perf.tolist() ] # put in a box
+            self.Perf = self.Perf.tolist()
+            if (type(self.Perf[0]) != list): # If just 1 epoch, get values. want list of values.
+                self.Perf = [self.Perf]
         else:
             print('Could not load Training_Progress.csv')
             
@@ -303,16 +335,46 @@ class Generic_Model:
         # Normalization and Tensor conversion now frontloaded (CPU) for speed
         return image_batch    
      
-            
-    # %%
+
+    # %% tuned for classifier
     def Train(self):
-        # store a copy of the best model available
         Best_Model = copy.deepcopy(self.model)
         
-        # Train
+        train_loss = -1 # in case no training occurs
         accumulation_iterations = int(self.batch_size / self.GPU_minibatch_limit)
         
-        train_loss = 0
+        # Try to load a checkpointed model?
+        if self.epoch_end > self.epoch_start:
+            print('GenericModel.Train(): Training Requested. Loading best then last checkpoints.')
+            last_checkpoint_path = os.path.join(self.model_folder_path, 'Checkpoint.pt')
+            best_checkpoint_path = os.path.join(self.model_folder_path, 'Best_Checkpoint.pt')
+            if (os.path.isfile(last_checkpoint_path)):
+                if (os.path.isfile(best_checkpoint_path)):
+                    self.Load('Best')
+                    Best_Model = copy.deepcopy(self.model)
+                    print('GenericModel.Train(): Best Checkpoint loaded and Best model copied.')
+                    self.Load('Last')
+                    print('GenericModel.Train(): Checkpointed model loaded. Will resume training.')
+                    
+                    val_perfs = np.array([k[2] for k in self.Perf])
+                    if (self.early_stop > 0):
+                        if (len(val_perfs) - (np.argmin(val_perfs) + 1 ) ) >= self.early_stop:
+                            # ^ add one: len_val_perfs is num trained epochs (starts at 1), but argmin starts at 0.
+                            print('GenericModel.Train(): Model at early stop. Setting epoch_start to epoch_end to cancel training')
+                            self.epoch_start = self.epoch_end
+                            
+                    if (self.epoch_start == self.epoch_end):
+                        print('GenericModel.Train(): Loaded checkpointed model already trained')
+                    if (self.epoch_start > self.epoch_end):
+                        print('GenericModel.Train(): Requested train epochs > current epochs trained. evaluating.')
+                        self.epoch_start = self.epoch_end
+                        # breakpoint()
+                else:
+                    print('GenericModel.Train(): FAILED to load best model! Eval may be compromised')
+            else:
+                print('GenericModel.Train(): Last checkpoint unavailable.')
+        
+        
         for epoch in range(self.epoch_start, self.epoch_end):
             self.model.train()
             epoch_start_time = time.time()
@@ -327,8 +389,11 @@ class Generic_Model:
                 
                 labels = labels.to(self.device)
                 labels = labels.type(torch.float32) # again, convert type AFTER putting on GPU
+                
 
                 model_out = self.model(imgs)
+                
+                
                 loss = Get_Loss(model_out, labels, self.Loss_Params) 
                 train_loss += loss.item()
                 loss.backward()
@@ -339,14 +404,11 @@ class Generic_Model:
                     self.model.zero_grad()  
 
             epoch_end_time = time.time()
-            
-            
-            
+
             # ----
             # Run Validation and Checkpoint
             if ( (epoch+1) % self.validate_every ==0):
                 
-                # Get Validation MSE
                 outputs, val_loss, correct_outputs = self.Run_NN(self.val_dataloader)
                 
                 # update scheduler # no effect unless args['Scheduler'] == 'True'
@@ -387,15 +449,13 @@ class Generic_Model:
                 Perf_Plot_Path = os.path.join(self.model_folder_path, 'Training_Plot.png')
                 self.Save_Perf_Curves(self.Perf, Perf_Plot_Path)
                 
-                
-                    
                 # consider stopping
                 val_perfs = np.array([k[2] for k in self.Perf])
                 if (self.early_stop > 0):
                     if (len(val_perfs) - (np.argmin(val_perfs) + 1 ) ) >= self.early_stop:
                         # ^ add one: len_val_perfs is num trained epochs (starts at 1), but argmin starts at 0.
                         break
-                
+                     
         # now that we're done training, load the best model back for evaluation
         self.model = copy.deepcopy(Best_Model)
         return train_loss
@@ -449,8 +509,10 @@ class Generic_Model:
     
     # %% Test
     def Test(self, Which_Dataloader = 'Test'):
-        if (Which_Dataloader == 'Train'): 
-            outputs, test_loss, correct_outputs = self.Run_NN(self.train_dataloader_unshuffled) # NOT shuffled
+        if (Which_Dataloader == 'Train'):            
+            self.train_dataloader.batch_sampler.shuffle = False
+            outputs, test_loss, correct_outputs = self.Run_NN(self.train_dataloader) # NOT shuffled
+            self.train_dataloader.batch_sampler.shuffle = True
         elif (Which_Dataloader == 'Validation'):
             outputs, test_loss, correct_outputs = self.Run_NN(self.val_dataloader) # NOT shuffled
         else:

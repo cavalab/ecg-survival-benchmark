@@ -97,41 +97,45 @@ class InceptionTimeRegression_PyCox(Generic_Model_PyCox):
                 self.model[-1] = nn.Linear(in_features=4*32*1, out_features=self.Num_Classes, bias=True) # self.Num_Classes is set in Generic_Model_PyCox
             self.model.to(self.device)
             self.pycox_mdl = self.Get_PyCox_Model() # init the optimizer and scheduler
-            
-        # Generic_Model_PyCox init: 5) Prep validation loss and performance storage list
-        self.Val_Best_Loss = 9999999
-        self.Perf = []
+
         
 
 # %%
     def Load(self, best_or_last):
         
         Import_Dict = self.Load_Checkpoint(best_or_last)
-        self.Load_Random_State(Import_Dict)
+        
         self.Load_Training_Params(Import_Dict)
         self.Load_Training_Progress(Import_Dict)
-        self.Load_Normalization(Import_Dict)
+        # self.Load_Normalization(Import_Dict) # we frontload normalization based on Train data, so this no longer matters
 
         # initialize model, update model shape, send to GPU, update weights, load optimizer and scheduler
-        Actual_output_class_count = Import_Dict['model_state_dict']['4.weight'].shape[0]
-        if ('0.inception_1.bottleneck.weight' in Import_Dict['model_state_dict'].keys()):
-            input_chan_count = Import_Dict['model_state_dict']['0.inception_1.bottleneck.weight'].shape[1]
-        else:
-            input_chan_count = 1
+        # Actual_output_class_count = Import_Dict['model_state_dict']['4.weight'].shape[0]
+        # if ('0.inception_1.bottleneck.weight' in Import_Dict['model_state_dict'].keys()):
+        #     input_chan_count = Import_Dict['model_state_dict']['0.inception_1.bottleneck.weight'].shape[1]
+        # else:
+        #     input_chan_count = 1
             
-        self.model = InceptionTime(in_channels=input_chan_count, Kernel_Mult = self.K_M)
-        self.model[-1]  = nn.Linear(in_features = 4*32*1, out_features=Actual_output_class_count, bias=True)
-        self.model.to(self.device)
-        self.pycox_mdl = self.Get_PyCox_Model() # init the optimizer and scheduler
+        # self.model = InceptionTime(in_channels=input_chan_count, Kernel_Mult = self.K_M)
+        # self.model[-1]  = nn.Linear(in_features = 4*32*1, out_features=Actual_output_class_count, bias=True)
+        # self.model.to(self.device)
+        # self.pycox_mdl = self.Get_PyCox_Model() # init the optimizer and scheduler
         self.model.load_state_dict(Import_Dict['model_state_dict'])
         if ('optimizer_state_dict' in Import_Dict.keys()):
             self.optimizer.load_state_dict(Import_Dict['optimizer_state_dict'])
+            print('loaded optimizer')
+        else:
+            print('NO optimizer loaded')
         if ('scheduler_state_dict' in Import_Dict.keys()):
             self.scheduler.load_state_dict(Import_Dict['scheduler_state_dict'])
+            print('loaded scheduler')
+        else:
+            print("NO scheduler loaded")
             
             
         # Now set up time discretization
-        self.Discretize_On_Load(Import_Dict)
+        # self.Discretize_On_Load(Import_Dict)
+        self.Load_Random_State(Import_Dict)
 
                 
     # %%Overwrite how we adjust _each_ input and _multiple_ inputs. InceptionTime wants a different shape for data (not NCHW but NHW)

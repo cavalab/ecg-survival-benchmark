@@ -99,40 +99,46 @@ class Ribeiro_Regression_PyCox(Generic_Model_PyCox):
         self.pycox_mdl = self.Get_PyCox_Model() # init the optimizer and scheduler
         
 
-        # Generic_Model_PyCox init: 5) Prep validation loss and performance storage list
-        self.Val_Best_Loss = 9999999
-        self.Perf = []
         
     # %% Load
     def Load(self, best_or_last):
         
         # Load random state (I still don't know why train 2 epoch ~ = train 1, load, train 1)
         Import_Dict = self.Load_Checkpoint(best_or_last)
-        self.Load_Random_State(Import_Dict)
+        
         self.Load_Training_Params(Import_Dict)
         self.Load_Training_Progress(Import_Dict)
-        self.Load_Normalization(Import_Dict)
+        # self.Load_Normalization(Import_Dict) # we frontload normalization based on Train data, so this no longer matters
+        
 
         # initialize model, update model shape, send to GPU, update weights, load optimizer and scheduler
-        N_LEADS = 12
-        self.Num_Classes = Import_Dict['model_state_dict']['lin.weight'].shape[0] # number of output classes
-        self.model = ResNet1d(input_dim=(N_LEADS, self.seq_length),
-                         blocks_dim=list(zip(self.net_filter_size, self.net_seq_lengh)),
-                         n_classes=self.Num_Classes,
-                         kernel_size=self.kernel_size,
-                         dropout_rate=self.dropout_rate)
-        self.model.to(self.device)
+        # N_LEADS = 12
+        # self.Num_Classes = Import_Dict['model_state_dict']['lin.weight'].shape[0] # number of output classes
+        # self.model = ResNet1d(input_dim=(N_LEADS, self.seq_length),
+        #                  blocks_dim=list(zip(self.net_filter_size, self.net_seq_lengh)),
+        #                  n_classes=self.Num_Classes,
+        #                  kernel_size=self.kernel_size,
+        #                  dropout_rate=self.dropout_rate)
+        # self.model.to(self.device)
         self.model.load_state_dict(Import_Dict['model_state_dict'])
         
-        self.pycox_mdl = self.Get_PyCox_Model() # also inits the optimizer and scheduler
+        # self.pycox_mdl = self.Get_PyCox_Model() # also inits the optimizer and scheduler
 
         if ('optimizer_state_dict' in Import_Dict.keys()):
             self.optimizer.load_state_dict(Import_Dict['optimizer_state_dict'])
+            print('loaded optimizer')
+        else:
+            print('NO optimizer loaded')
         if ('scheduler_state_dict' in Import_Dict.keys()):
             self.scheduler.load_state_dict(Import_Dict['scheduler_state_dict'])
+            print('loaded scheduler')
+        else:
+            print("NO scheduler loaded")
 
         # Discretization: Load and Set Up
-        self.Discretize_On_Load(Import_Dict)
+        # self.Discretize_On_Load(Import_Dict)
+        self.Load_Random_State(Import_Dict)
+        
             
 
     

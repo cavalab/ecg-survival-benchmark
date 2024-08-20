@@ -73,6 +73,10 @@ from pycox.utils import kaplan_meier
 from MODELS import Support_Functions
 from MODELS import InceptionTimeClassifier
 from MODELS import Ribeiro_Classifier
+from MODELS import FFClass
+from MODELS import LSTMClass
+from MODELS import TimesNetClass
+
 from MODELS.Support_Functions import get_surv_briercordance # only get useful time points (bootstraps)
 from MODELS.Support_Functions import get_AUROC_AUPRC
 from MODELS.Support_Functions import Save_to_hdf5
@@ -171,13 +175,17 @@ def Run_Model(args):
     
     # %% 4. Data load - NeurIPS simplified. Assume we are pulling from 'train_folder' and 'test_folder'
     Data = {}
-    with h5py.File(os.path.join(os.getcwd(),'HDF5_DATA',args['Train_Folder'],'TRAIN_DATA','Train_Data.hdf5'), "r") as f:
+    datapath1 = os.path.dirname(os.getcwd()) # cleverly jump one one folder without referencing \\ (windows) or '/' (E3)
+    with h5py.File(os.path.join(datapath1,'HDF5_DATA',args['Train_Folder'],'TRAIN_DATA','Train_Data.hdf5'), "r") as f:
         Data['x_train'] = f['x'][()]
         Data['y_train'] = f['y'][()]
     
-    with h5py.File(os.path.join(os.getcwd(),'HDF5_DATA',args['Test_Folder'],'TEST_DATA','Test_Data.hdf5'), "r") as f:
+    with h5py.File(os.path.join(datapath1,'HDF5_DATA',args['Test_Folder'],'TEST_DATA','Test_Data.hdf5'), "r") as f:
         Data['x_test'] = f['x'][()]
         Data['y_test'] = f['y'][()] 
+        
+    print('Loaded Train and Test. Total time elapsed: ' + str(time.time()-start_time) )
+        
                 
     
     # %% 5 Data clean
@@ -192,11 +200,18 @@ def Run_Model(args):
             neg_inds = np.where(Data[key][:,int(args['y_col_train_time'])] < 0)[0]
             inds_to_del = neg_inds.tolist()
             
-            # mark nan traces
-            nan_inds = np.where(np.sum(np.sum(np.isnan(Data[x_key]),axis=2),axis=1) > 0)[0]
-            for k in nan_inds:
-                if k not in inds_to_del:
-                    inds_to_del.append(k)
+            # mark nan traces (5x faster)
+            for i in range(Data[x_key].shape[0]):
+                if (np.isnan(Data[x_key][i]).any()):
+                    if i not in inds_to_del:
+                        inds_to_del.append(i)
+            
+            # mark nan traces (pre 8/14/24)
+            # nan_inds = np.where(np.sum(np.sum(np.isnan(Data[x_key]),axis=2),axis=1) > 0)[0]
+            # for k in nan_inds:
+            #     if k not in inds_to_del:
+            #         inds_to_del.append(k)
+            
                      
             # remove data, avoid calling np.delete on Data cause that doubles RAM - just select the indices to keep instead
             if (len(inds_to_del) > 0):
@@ -205,6 +220,7 @@ def Run_Model(args):
                 Data[x_key] = Data[x_key][inds_to_keep] 
                 Data[key] = Data[key][inds_to_keep] 
             
+    print('Checked data for negative time and nan ECG. Total time elapsed: ' + str(time.time()-start_time) )
     
     # %% 6 Backup data labels for evaluation (we'll change them before training)
     Data_Y_Backup = {}
@@ -254,25 +270,40 @@ def Run_Model(args):
         # Per ID, find matching data rows      
         Subj_IDs = Data_Y_Backup['y_train'][:,0]            
         Subj_IDs_Unique = np.unique(Subj_IDs)
+        
+        #Speedup 08/14/24
         Subj_ID_to_Rows_Dict = {} # map ID to rows
-        for k in Subj_IDs_Unique:
-            Subj_ID_to_Rows_Dict[k] = np.where(Subj_IDs == k)[0] 
+        for ind,val in enumerate(Subj_IDs):
+            if val in Subj_ID_to_Rows_Dict.keys():
+                Subj_ID_to_Rows_Dict[val].append(ind)
+            else:
+                Subj_ID_to_Rows_Dict[val] = [ind]
+                
+        # Subj_ID_to_Rows_Dict = {} # map ID to rows
+        # for k in Subj_IDs_Unique:
+        #     Subj_ID_to_Rows_Dict[k] = np.where(Subj_IDs == k)[0] 
 
         # Split
         Train_Inds, Val_Inds, Test_Inds = Support_Functions.Data_Split_Rand( [k for k in range(len(Subj_IDs_Unique))], TR, VA, TE)
 
         # Okay, now that we've split unique patient IDs we need to convert that back to ECG rows
-        Train_Inds_ECG = []
-        for k in Train_Inds:
-            Train_Inds_ECG = Train_Inds_ECG + [ m for m in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[k]] ]
+        # Train_Inds_ECG = []
+        # for k in Train_Inds:
+        #     Train_Inds_ECG = Train_Inds_ECG + [ m for m in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[k]] ]
+        # Faster equivalent. 0.05s instead of 213.
+        Train_Inds_ECG  = [Row for PID in Train_Inds for Row in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[PID]] ]
         
-        Val_Inds_ECG = []
-        for k in Val_Inds:
-            Val_Inds_ECG = Val_Inds_ECG + [ m for m in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[k]] ]
-            
-        Test_Inds_ECG = []
-        for k in Test_Inds:
-            Test_Inds_ECG = Test_Inds_ECG + [ m for m in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[k]] ]
+        # Val_Inds_ECG = []
+        # for k in Val_Inds:
+        #     Val_Inds_ECG = Val_Inds_ECG + [ m for m in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[k]] ]
+        # Faster Equivalent
+        Val_Inds_ECG  = [Row for PID in Val_Inds for Row in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[PID]] ]
+        
+        # Test_Inds_ECG = []
+        # for k in Test_Inds:
+        #     Test_Inds_ECG = Test_Inds_ECG + [ m for m in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[k]] ]
+        # Faster Equivalent
+        Test_Inds_ECG = [Row for PID in Test_Inds for Row in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[PID]] ]
         
         Train_Inds = Train_Inds_ECG
         Val_Inds = Val_Inds_ECG
@@ -289,7 +320,8 @@ def Run_Model(args):
           
     else:
         print('No Data Split')
-            
+    
+    print('Split Train into Train/Valid. Total time elapsed: ' + str(time.time()-start_time) )                            
         
     # %% 9. set up trained model folders if they  don't exist
 
@@ -334,16 +366,31 @@ def Run_Model(args):
         Data_Y_Backup['y_valid'] = Data_Y_Backup['y_valid'][va_inds,:] 
         Data_Y_Backup['y_test'] = Data_Y_Backup['y_test'][te_inds,:] 
         
+    # %% 10. Select model, (maybe) train, and run
+         
     print('Got to init. Total time elapsed: ' + str(time.time()-start_time) )
     if (Model_Type == 'InceptionClass'):
         asdf = InceptionTimeClassifier.InceptionTimeClassifier(args, Data)
     if (Model_Type == 'RibeiroClass'):
         asdf = Ribeiro_Classifier.Ribeiro_Classifier(args, Data)
-           
+        
+    if (Model_Type == 'Resnet18'):
+        asdf = CV_Resnet18_Classifier_Flip.CV_Resnet18_Classifier_Flip(args, Data)
+        
+    if (Model_Type == 'FFClass'):
+        asdf = FFClass.FFClass(args, Data)
+        
+    if (Model_Type == 'LSTMClass'):
+        asdf = LSTMClass.LSTMClass(args, Data)
+        
+    if (Model_Type == 'TimesNetClass'):        
+        asdf = TimesNetClass.TimesNetClass(args, Data)
+        
     print('Got to Train. Total time elapsed: ' + str(time.time()-start_time) )
     if( ('Load' in args.keys())):
         asdf.Load(args['Load'])
     asdf.Train()
+        
 
     # %% 11. Generate and save out results    
     if ('Test_Folder' in args.keys()):
@@ -609,6 +656,60 @@ def Run_Model(args):
         np.savetxt(hist_path, temp, header=headers, delimiter = ',')
         
         print('Finished evaluation. Total time elapsed: ' + str(time.time()-start_time) )
+        
+        
+        # %% multimodal work
+        # # %% 20. Save out some more things 
+        # multim_path = os.path.join(temp_path, 'Multimodal_Out.csv')
+        # temp = np.vstack( (Data_Y_Backup['y_test'][:,0],test_outputs,test_correct_outputs,Data_Y_Backup['y_test'][:,3], Data_Y_Backup['y_test'][:,4] )  )
+        # temp = np.transpose(temp)
+        # headers = 'PID, test_outputs, test_correct_output, TTE, E'
+        # np.savetxt(multim_path, temp, header=headers, delimiter = ',')
+        
+        # auroc_2, auprc_2, Chance_At_Age = get_AUROC_AUPRC(disc_y_t, disc_y_e, surv, [30/365], sample_time_points)
+        
+        
+        # # PID = Data_Y_Backup['y_test'][:,0]
+        # # test_outputs # softmax
+        # # test_correct_outputs # label passed
+        # # TTE = Data_Y_Backup['y_test'][:,3]
+        # # TTE = Data_Y_Backup['y_test'][:,4]
+        
+        # # %%21. Save out some more details
+        
+        # # 1. What is distribution of ECG count per PID in last T time?
+        # x = 0.05*np.arange(21)
+        # save_out = [x]
+        
+        # for time_lim in [1/52,1/12,1,999]:
+        #     subset = Data_Y_Backup['y_train'][np.where(Data_Y_Backup['y_train'][:,3] <= time_lim)[0],:]
+        #     unique_PID = np.unique(subset[:,0])
+        #     counts = [np.where(subset[:,0] == k)[0].shape[0] for k in unique_PID]
+        #     event = [Data_Y_Backup['y_train'][np.where(subset == k)[0][0],4] for k in unique_PID  ]
+        #     event = np.array(event).astype(int)
+        #     counts = np.array(counts).astype(int)
+            
+        #     y1 = np.quantile(counts[np.where(event==1)],x)
+        #     y2 = np.quantile(counts[np.where(event==0)],x)
+        #     save_out.append(y1)
+        #     save_out.append(y2)
+            
+        #     plt.figure()
+        #     plt.scatter(x*100,y2)
+        #     plt.scatter(x*100,y1)
+        #     plt.legend(['event=0 med '+str(np.median(y2))+' u '+'{0:.2f}'.format(np.mean(y2)),'event=1 med '+str(np.median(y1)) + ' u '+'{0:.2f}'.format(np.mean(y1))])
+        #     plt.xlabel('percentile')
+        #     plt.ylabel('count')
+        #     plt.title('count per PID | TTE < '+str(time_lim))
+            
+        # characteristics_path = os.path.join(temp_path, 'Train_Characteristics.csv')
+        # headers = 'percentile, 1-wk event 1, 1-wk event 0, 1-mo event 1, 1-mo event 0,1-yr event 1, 1-yr event 0, all-t event 1, all-t event 0'
+        # temp = np.array(save_out).transpose()
+        # np.savetxt(characteristics_path, temp, header=headers, delimiter = ',')
+        
+        
+        
+        
     # %% load?
     # asdf.Load()
     

@@ -28,7 +28,7 @@ import numpy as np
 import time
 import os
 
-from MODELS.Generic_Model import Generic_Model
+from MODELS.GenericModel import  GenericModel
 
 # import Support_Functions
 from MODELS.Support_Functions import Custom_Dataset
@@ -42,20 +42,26 @@ from MODELS.Support_Functions import Get_Loss
 
 
 
-class Ribeiro_Classifier(Generic_Model):
+class Ribeiro_Classifier(GenericModel):
     
     def __init__(self, args, Data):
         
         print('Ribeiro Classifier currently expects signals to have length 4096')
-        self.Process_Args(args)
-        self.Process_Data_To_Dataloaders(Data)
         
+        #1. Process_Args
+        self.Process_Args(args)
+        
+        #2. Prep_Normalization
         # Ribeiro model defaults to no normalization of input
         if ('Norm_Func' not in args.keys()):
             args['Norm_Func'] = 'None'
             print('By default, Ribeiro model does not normalize inputs')
-        self.Prep_Normalization(args, Data)
+        self.prep_normalization_and_reshape_data(args, Data)
         
+        #3. Prep_Dataloaders
+        self.Prep_Dataloaders_and_Normalize_Data()
+        
+        # 4. Prep Loss Params
         # Prep loss function w crossentropy default
         # self.Prep_LossFunction(args, Data) # Classifier default is crossentropy
         if 'y_train' in Data.keys():     
@@ -67,6 +73,8 @@ class Ribeiro_Classifier(Generic_Model):
             print ('Defaulting to CrossEntropyLoss')
             self.Loss_Params = Get_Loss_Params(args) 
             
+        a = time.time()
+        # 5. Build your model
         # Extra arg processing
         if ('seq_length' in args.keys()):
             self.seq_length = int(args['seq_length'])
@@ -97,54 +105,66 @@ class Ribeiro_Classifier(Generic_Model):
         else:
             self.kernel_size = 17
             
-        
         # Prep a model, send to device
         if 'y_train' in Data.keys():
             N_LEADS = Data['x_train'].shape[3]
         else:
             N_LEADS = 12 # the 12 leads
-        if 'y_train' in Data.keys():
-            N_CLASSES = len(np.unique(Data['y_train']))
+       
+        
+        self.single_model_init()
+        self.model.to(self.device)
+            
+        # 6. Prep optimizer and scheduler
+        # self.Try_LSTM_Wrap()
+        self.Prep_Optimizer_And_Scheduler()
+        
+        print('RibeiroClass: Model/Optimizer/Scheduler T= ',time.time()-a)
+        
+    def single_model_init(self):
+        if (self.LSTM == False):
+            N_CLASSES = 2  
         else:
-            N_CLASSES = 1  
+            N_CLASSES = self.LSTM_Feat_Size
+            
+        N_LEADS = 12
         self.model = ResNet1d(input_dim=(N_LEADS, self.seq_length),
                          blocks_dim=list(zip(self.net_filter_size, self.net_seq_lengh)),
                          n_classes=N_CLASSES,
                          kernel_size=self.kernel_size,
                          dropout_rate=self.dropout_rate)
-        self.model.to(self.device)
-            
-        # Prep optimizer and scheduler
-        self.Prep_Optimizer_And_Scheduler()
         
-        # Prep training parameters (that can be overwritten by load() )
-        self.Val_Best_Loss = 9999999
-        self.Perf = []
+        
+        
+        
         
     # %% Load
     def Load(self, best_or_last):
         
-        Import_Dict = self.Load_Checkpoint(best_or_last)
-        self.Load_Random_State(Import_Dict)
+        Import_Dict = self.Load_Checkpoint(best_or_last)   
         self.Load_Training_Params(Import_Dict)
         self.Load_Training_Progress(Import_Dict)
-        self.Load_Normalization(Import_Dict)
+        # self.Load_Normalization(Import_Dict) # we're frontloading normalization, so that doesn't matter
 
-        # initialize model, update model shape, send to GPU, update weights, load optimizer and scheduler
-        N_LEADS = 12
-        N_CLASSES = Import_Dict['model_state_dict']['lin.weight'].shape[0]
-        self.model = ResNet1d(input_dim=(N_LEADS, self.seq_length),
-                         blocks_dim=list(zip(self.net_filter_size, self.net_seq_lengh)),
-                         n_classes=N_CLASSES,
-                         kernel_size=self.kernel_size,
-                         dropout_rate=self.dropout_rate)
-        self.model.to(self.device)
+        # self.single_model_init()
+        # self.Try_LSTM_Wrap() # have LSTM wrap this model
+        # self.model.to(self.device) #
+        
+        # self.Prep_Optimizer_And_Scheduler() # re-build and re-attach optimizer to model
         self.model.load_state_dict(Import_Dict['model_state_dict'])
         
         if ('optimizer_state_dict' in Import_Dict.keys()):
             self.optimizer.load_state_dict(Import_Dict['optimizer_state_dict'])
+        else:
+            print('NO optimizer loaded')
         if ('scheduler_state_dict' in Import_Dict.keys()):
             self.scheduler.load_state_dict(Import_Dict['scheduler_state_dict'])
+        else:
+            print("NO scheduler loaded")
+
+        self.Load_Random_State(Import_Dict)
+        
+        
     
     # %%Overwrite image adjustment - Ribeiro wants a different shape for data
     def Adjust_Many_Images(self, image_batch):

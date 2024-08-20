@@ -43,7 +43,7 @@ import numpy as np
 import time
 import os
 
-from MODELS.Generic_Model import Generic_Model
+from MODELS.GenericModel import GenericModel
 
 from MODELS.Support_Functions import Save_Train_Args
 from MODELS.Support_Functions import Structure_Data_NCHW
@@ -174,7 +174,7 @@ def collate_fn(batch):
     return tt.tuplefy(batch).stack() # demands torch tensors
 
 # %%  ---------------- Start the model
-class Generic_Model_PyCox(Generic_Model):
+class Generic_Model_PyCox(GenericModel):
 
     def __init__(self, args, Data):
         # init should be overwritten at specific model level
@@ -213,10 +213,11 @@ class Generic_Model_PyCox(Generic_Model):
         # if no x_train in Data, will load model and prep norm/discretization there
         # then we are loading a model and that loads normalization/discretization parameters)
         self.max_duration = None
-        self.Data = Data
+        # self.Data = Data
         if 'x_train' in Data.keys():
-            self.Data['x_train'] = Structure_Data_NCHW(self.Data['x_train'])
-            self.Prep_Normalization(args, self.Data)
+            self.prep_normalization_and_reshape_data(args, Data)
+            # self.Data['x_train'] = Structure_Data_NCHW(self.Data['x_train'])
+            # self.Prep_Normalization(args, self.Data)
             self.max_duration = max(Data['y_train'][:,0])
             self.labtrans = LogisticHazard.label_transform(self.num_durations)
             self.labtrans.fit_transform(np.array([0,self.max_duration]), np.array([0,1]))
@@ -230,8 +231,7 @@ class Generic_Model_PyCox(Generic_Model):
 # 3) Prep Datasets and DataLoaders
 
     def Process_Data_To_Dataloaders(self):
-        print('front-loading normalization')  
-        
+        a = time.time()
         func_list = []
         func_list.append(self.Adjust_Image) # adjust each input individually after loading
         
@@ -258,7 +258,7 @@ class Generic_Model_PyCox(Generic_Model):
                 self.Data['y_test'][:,0],  self.Data['y_test'][:,1]  = self.labtrans.transform(self.Data['y_test'][:,0],  self.Data['y_test'][:,1])
             self.test_dataset = Dataset_FuncList(self.Data['x_test'], targets = self.Data['y_test'], func_list = func_list, discretize=self.Discretize, Toggle='X') #Only returns X, not Y
             self.test_dataloader = torch.utils.data.DataLoader (self.test_dataset,  batch_size = self.GPU_minibatch_limit, collate_fn=collate_fn, shuffle = False) #DO NOT SHUFFLE
-        
+        print('GenericModel_PyCox: Dataloader prep T = ', time.time() - a)
 
 # %% Prep pycox model (here so as not to duplicate in train, load, and run)
     def Get_PyCox_Model(self):
@@ -283,8 +283,42 @@ class Generic_Model_PyCox(Generic_Model):
         # store a copy of the best model available
         Best_Model = copy.deepcopy(self.model)
         
+        
+        train_loss = -1 # in case no training occurs
+        # Try to load a checkpointed model?
+        if self.epoch_end > self.epoch_start:
+            print('Generic_Model_PyCox.Train(): Training Requested. Loading best then last checkpoints.')
+            last_checkpoint_path = os.path.join(self.model_folder_path, 'Checkpoint.pt')
+            best_checkpoint_path = os.path.join(self.model_folder_path, 'Best_Checkpoint.pt')
+            if (os.path.isfile(last_checkpoint_path)):
+                if (os.path.isfile(best_checkpoint_path)):
+                    self.Load('Best')
+                    Best_Model = copy.deepcopy(self.model)
+                    print('Generic_Model_PyCox.Train(): Best Checkpoint loaded and Best model copied.')
+                    self.Load('Last')
+                    print('Generic_Model_PyCox.Train(): Checkpointed model loaded. Will resume training.')
+                    
+                    val_perfs = np.array([k[2] for k in self.Perf])
+                    if (self.early_stop > 0):
+                        if (len(val_perfs) - (np.argmin(val_perfs) + 1 ) ) >= self.early_stop:
+                            # ^ add one: len_val_perfs is num trained epochs (starts at 1), but argmin starts at 0.
+                            print('Generic_Model_PyCox.Train(): Model at early stop. Setting epoch_start to epoch_end to cancel training')
+                            self.epoch_start = self.epoch_end
+                    
+                    if (self.epoch_start == self.epoch_end):
+                        print('Generic_Model_PyCox.Train(): Loaded checkpointed model already trained')
+                    if (self.epoch_start > self.epoch_end):
+                        print('Generic_Model_PyCox.Train(): Requested train epochs > current epochs trained. evaluating.')
+                        self.epoch_start = self.epoch_end
+                        # breakpoint()
+                else:
+                    print('Generic_Model_PyCox.Train(): FAILED to load best model! Eval may be compromised')
+            else:
+                print('Generic_Model_PyCox.Train(): Last checkpoint unavailable.')
+                
+                
+                
         # Train
-        train_loss = 0 
         for epoch in range(self.epoch_start, self.epoch_end):
 
             epoch_start_time = time.time()
@@ -325,7 +359,7 @@ class Generic_Model_PyCox(Generic_Model):
                     else:
                         Save_NN_PyCox(epoch, self.model, nn_file_path, optimizer = self.optimizer, scheduler=None, best_performance_measure = val_loss, NT = self.Normalize_Type, NM = self.Normalize_Mean, NS = self.Normalize_StDev, max_duration=self.max_duration)
                 Save_Train_Args(os.path.join(self.model_folder_path,'Train_Args.txt'), self.args)
-    
+                
                 # Update Progress
                 new_perf = [epoch, train_loss, val_loss, tmp_LR , epoch_end_time - epoch_start_time]
                 print(new_perf)
@@ -338,14 +372,14 @@ class Generic_Model_PyCox(Generic_Model):
                 # save out performance curves
                 Perf_Plot_Path = os.path.join(self.model_folder_path, 'Training_Plot.png')
                 self.Save_Perf_Curves(self.Perf, Perf_Plot_Path)
-               
-                # consider stopping
+                
+                # consider stopping based on early stop
                 val_perfs = np.array([k[2] for k in self.Perf])
                 if (self.early_stop > 0):
                     if (len(val_perfs) - (np.argmin(val_perfs) + 1 ) ) >= self.early_stop:
                         # ^ add one: len_val_perfs is num trained epochs (starts at 1), but argmin starts at 0.
                         break
-                    
+        
         self.model = copy.deepcopy(Best_Model)
         self.pycox_mdl.net = self.model
         return train_loss
@@ -442,29 +476,27 @@ def Save_NN_PyCox(epoch, model, path, best_performance_measure=9999999, optimize
     # https://pytorch.org/tutorials/recipes/recipes/saving_and_loading_a_general_checkpoint.html
     # best_performance_measure refers to the performance of the best model so far
     # so we don't accidentally overwrite it
+    
     Out_Dict = {}
     Out_Dict['epoch'] = epoch
     Out_Dict['model_state_dict'] = model.state_dict()
-    
     Out_Dict['Numpy_Random_State'] = np.random.get_state()
     Out_Dict['Torch_Random_State'] = torch.get_rng_state()
-    
+    Out_Dict['CUDA_Random_State'] = torch.cuda.get_rng_state()
     Out_Dict['best_performance_measure'] = best_performance_measure
+    
     if (optimizer is not None):
         Out_Dict['optimizer_state_dict'] = optimizer.state_dict()
-        
     if (scheduler is not None):
         Out_Dict['scheduler_state_dict'] = scheduler.state_dict()
         
     # Normalization Parameters
     if (NT is not None):
-        Out_Dict['NT'] = NT
-        
+        Out_Dict['NT'] = NT # normalization type
     if (NM is not None):
-        Out_Dict['NM'] = NM
-        
+        Out_Dict['NM'] = NM # normaliation mean per channel
     if (NS is not None):
-        Out_Dict['NS'] = NS
+        Out_Dict['NS'] = NS # normalization stdev per channel
         
     # Time discretization - if you have the number of cuts (which you get from model size) and the max duration, you can recreate the discretization
     if (max_duration is not None):

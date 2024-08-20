@@ -18,6 +18,8 @@ from sklearn.metrics import roc_auc_score
 from sklearn.metrics import average_precision_score
 import os, h5py
 
+from torch.utils.data.sampler import BatchSampler
+
 # %% Generic Dataset used by classifiers
 class Custom_Dataset(torch.utils.data.Dataset):
     def __init__(self, data, targets):
@@ -132,10 +134,14 @@ def Get_Norm_Func_Params (args, Some_Array): # figure out how to normalize (from
     
     return norm_type, u, s # these can be saved
 
+     
+
 
 def Normalize (value, norm_type, u, s): # apply normalization to a batch input (like a test set)
     # input: batch NCHW pytorch tensor [passed by ref]
     # output: modified cloned output
+    
+    
     if norm_type == 'No_Norm':
         asdf = value
     
@@ -321,6 +327,22 @@ def Save_to_hdf5(path, var, var_name):
                 f.create_dataset(var_name, data = var)
                 print('saved ' + var_name)
                 
-        
+# def debug_load():
+#     old_model = copy.deepcopy(self.model)
+#     old_np_state = np.random.get_state()
+#     old_torch_state = torch.get_rng_state()
+    
+#     # from https://discuss.pytorch.org/t/check-if-models-have-same-weights/4351
+#     for p1, p2 in zip(old_model.parameters(), self.model.parameters()):
+#         if p1.data.ne(p2.data).sum() > 0:
+#             print ('parameter mismatch')
+    
+#     a = old_np_state[1]
+#     b = np.random.get_state()[1]
+#     if (sum(a!=b) > 0):
+#         print('NP rand err')
+    
+#     if (torch.equal(old_torch_state, torch.get_rng_state()) == False): # random state is different
+#         print('Torch rand err')    
     
     

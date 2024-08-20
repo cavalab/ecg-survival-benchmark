@@ -29,10 +29,11 @@ collections.Callable = collections.abc.Callable
 
 import Model_Runner_SurvClass
 
-args  = '--Train_Folder Code15'
-args += ' --Model_Name InceptionClass_asdf2' #InceptionClass or RibeiroClass
+args  = '--Train_Folder MIMICIV_Multimodal_Subset' #MIMICIV_Multimodal_Subset
+# args += ' --Model_Name InceptionClass_MM11' #InceptionClass or RibeiroClass or FFClass
+args += ' --Model_Name TimesNetClass_1' #InceptionClass or RibeiroClass or FFClass or LSTMClass or TimesNetClass
 # args += ' --Load Best'                     # if you want to load a model you've trained before
-args += ' --Test_Folder Code15'
+args += ' --Test_Folder MIMICIV_Multimodal_Subset'
 args += ' --batch_size 512'
 args += ' --epoch_end 5'                     # set to -1 if you don't want to train the model after initialization and loading
 args += ' --validate_every 1'
@@ -41,17 +42,57 @@ args += ' --GPU_minibatch_limit 32'          # how many samples go to GPU at one
 args += ' --Eval_Dataloader Test'            # 'Test' or 'Train' or 'Validate' - what you want performacne measures on
 args += ' --optimizer Adam'                  # should be default and only option
 args += ' --Scheduler True'                  # should be default, but is not only option
-# args += ' --debug True'                    # 'True' limits data to 1k samples of tr/val/test.
+
 args += ' --Loss_Type CrossEntropyLoss' 
 args += ' --early_stop 25'                   # Stop after this many epochs with no improvement
 args += ' --y_col_train_time 3'              #
 args += ' --y_col_train_event 4'             #
 args += ' --y_col_test_time 3'               # <- these depend on the data format
 args += ' --y_col_test_event 4'              # 
-args += ' --Rand_Seed 13'                    # Random seed
-args += ' --horizon 10.0'                    # What time (years) models should try to optimize for [Classifier specific]
+args += ' --Rand_Seed 10'                    # Random seed
+# args += ' --horizon 0.0822'                    # What time (years) models should try to optimize for [Classifier specific]
+args += ' --horizon 1'
 args += ' --Norm_Func nchW'                  # Normalize ECG per channel based on the training data set
 
+args += ' --debug True'                    # 'True' limits data to 1k samples of tr/val/test.
 
 args = args.split(' ')
 Model_Runner_SurvClass.Run_Model_via_String_Arr(args)
+
+# %% Regressions. (same args hold for Survival models)
+import collections
+collections.Callable = collections.abc.Callable
+
+import Model_Runner_PyCox
+
+args  = '--Train_Folder MIMICIV_Multimodal_Subset' #MIMICIV_Multimodal_Subset
+# args += ' --Model_Name InceptionClass_MM11' #InceptionClass or RibeiroClass or FFClass
+args += ' --Model_Name TimesNetReg_051624_4083406' #InceptionClass or RibeiroClass or FFClass or TimesNetReg
+# args += ' --Load Last'                     # if you want to load a model you've trained before
+args += ' --Test_Folder MIMICIV_Multimodal_Subset'
+args += ' --batch_size 512'
+args += ' --epoch_end -1'                     # set to -1 if you don't want to train the model after initialization and loading
+args += ' --validate_every 1'
+args += ' --Save_Out_Checkpoint True'
+args += ' --GPU_minibatch_limit 32'          # how many samples go to GPU at one time
+args += ' --Eval_Dataloader Test'            # 'Test' or 'Train' or 'Validate' - what you want performacne measures on
+args += ' --optimizer Adam'                  # should be default and only option
+args += ' --Scheduler True'                  # should be default, but is not only option
+
+args += ' --Loss_Type CrossEntropyLoss' 
+args += ' --early_stop 25'                   # Stop after this many epochs with no improvement
+args += ' --y_col_train_time 3'              #
+args += ' --y_col_train_event 4'             #
+args += ' --y_col_test_time 3'               # <- these depend on the data format
+args += ' --y_col_test_event 4'              # 
+args += ' --Rand_Seed 10'                    # Random seed
+# args += ' --horizon 0.0822'                    # What time (years) models should try to optimize for [Classifier specific]
+# args += ' --horizon 1'
+
+args += ' --pycox_mdl LH'
+args += ' --Norm_Func nchW'                  # Normalize ECG per channel based on the training data set
+
+args += ' --debug False'                    # 'True' limits data to 1k samples of tr/val/test.
+
+args = args.split(' ')
+Model_Runner_PyCox.Run_Model_via_String_Arr(args)

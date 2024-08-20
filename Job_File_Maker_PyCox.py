@@ -98,7 +98,7 @@ def Get_Global_String_List( time_h, time_m, GPU, mem, model_type, name_suffix_li
     # String_List = String_List_Append(String_List, 'module load singularity') # don't need after 5/1/24
     
     # And now we build the call
-    Sing_Cmd = 'singularity exec --bind $PWD --nv Sing_Torch_05032024.sif python3 \'Model_Runner_PyCox.py\''
+    Sing_Cmd = 'singularity exec --bind /lab-share --nv Sing_Torch_05032024.sif python3 \'Model_Runner_PyCox.py\''
     Sing_Cmd = Sing_Cmd + ' ' + '--Model_Name ' + Full_Model_Name
     
     # Now we have a partial job file
@@ -161,17 +161,17 @@ time_h = 48 # hour # BCH - 6, Code15 - 15. Double for 'Any' GPU
 time_m = 00 # min
 
 GPU = 'Any' # Quadro_RTX or Titan_RTX or Tesla_K or Tesla_T or NVIDIA_A40 or or NVIDIA_A100 'Any' (Any is good for Eval) 
-mem = 100 # GB, must be int. usually 256
+mem = 333 # GB, must be int. usually 99 for Code15, or 333 for MIMIC-IV
 
 # %% Set Sweep params
 
 # each element of args_list MUST begin with ' --' (including the space)
 
-Model_Type_List = ['RibeiroReg', 'InceptionTimeReg'] # RibeiroReg, InceptionTimeReg
+Model_Type_List = ['TimesNetReg'] # RibeiroReg, InceptionTimeReg, LSTMReg, TimesNetReg
 for Model_Type in Model_Type_List:
     glob_args_list = [] # glob_args_list is a list of lists. if an appended list has more than one entry, generate job files per entry
 
-    folders = ['Code15', 'MIMICIV'] # ['BCH_ECG', 'Code15', 'MIMICIV']
+    folders = ['MIMICIV'] # ['BCH_ECG', 'Code15', 'MIMICIV']
     glob_args_list.append([ ' --Test_Folder ' + k + ' --Train_Folder ' + k for k in folders ])
     
 
@@ -181,7 +181,7 @@ for Model_Type in Model_Type_List:
         
     glob_args_list.append([ ' --Eval_Dataloader Test'  ]) # 'Test', 'Validation', or 'Train'. defaults to test. Others good to debug performance.
     
-    glob_args_list.append([ ' --Rand_Seed '+ str(k) for k in [10,11,12,13,14] ])  
+    glob_args_list.append([ ' --Rand_Seed '+ str(k) for k in [10,11,12] ])  
     
     
     glob_args_list.append([  ' --y_col_train_time 3'  ]) # code15; bch - time 3, event 4
