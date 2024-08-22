@@ -175,10 +175,12 @@ def Run_Model(args):
     with h5py.File(os.path.join(datapath1,'HDF5_DATA',args['Train_Folder'],'TRAIN_DATA','Train_Data.hdf5'), "r") as f:
         Data['x_train'] = f['x'][()]
         Data['y_train'] = f['y'][()]
+        Train_Col_Names = [k.decode('UTF-8') for k in f['column_names'][()]]
     
     with h5py.File(os.path.join(datapath1,'HDF5_DATA',args['Test_Folder'],'TEST_DATA','Test_Data.hdf5'), "r") as f:
         Data['x_test'] = f['x'][()]
         Data['y_test'] = f['y'][()] 
+        Test_Col_Names = [k.decode('UTF-8') for k in f['column_names'][()]]
         
     print('Loaded Train and Test. Total time elapsed: ' + str(time.time()-start_time) )
     
@@ -214,21 +216,20 @@ def Run_Model(args):
                 Data[key] = Data[key][inds_to_keep] 
                 
     print('Checked data for negative time and nan ECG. Total time elapsed: ' + str(time.time()-start_time) )                
-            
-    # %% 3.2 Backupdata labels for evaluation 
-    Data_Y_Backup = {}
-    if ( ('y_train' in Data.keys()) and (len(Data['y_train'].shape) > 1) ):
-        Data_Y_Backup['y_train'] = np.copy(Data['y_train'])
     
-    if ( ('y_test' in Data.keys()) and (len(Data['y_test'].shape) > 1) ):
-        Data_Y_Backup['y_test'] = np.copy(Data['y_test'])
-        
-    # %% 3.3 Prep the data you'll send over to the model
-    if ( ('y_train' in Data.keys()) and (len(Data['y_train'].shape) > 1) ):
-        Data['y_train'] = Data['y_train'][:,[int(args['y_col_train_time']),int(args['y_col_train_event'])]]
+    # %% 3. Restructure data
+    
+    # expand y_train - append PID, TTE*, E* @ column inds [-3,-2,-1], respectively
+    Data['y_train'] = np.concatenate((Data['y_train'], np.expand_dims(Data['y_train'][:,0],1)), axis=1) # PID is assumed to be column 0
+    Data['y_train'] = np.concatenate((Data['y_train'], np.expand_dims(Data['y_train'][:,int(args['y_col_train_time'])],1)), axis=1)
+    Data['y_train'] = np.concatenate((Data['y_train'], np.expand_dims(Data['y_train'][:,int(args['y_col_train_event'])],1)), axis=1)
 
-    if ( ('y_test' in Data.keys()) and (len(Data['y_test'].shape) > 1) ):
-        Data['y_test'] = Data['y_test'][:,[int(args['y_col_test_time']),int(args['y_col_test_event'])]]
+    # expand y_test - append PID, TTE*, E* @ column inds [-3,-2,-1], respectively
+    Data['y_test'] = np.concatenate((Data['y_test'], np.expand_dims(Data['y_test'][:,0],1)), axis=1)
+    Data['y_test'] = np.concatenate((Data['y_test'], np.expand_dims(Data['y_test'][:,int(args['y_col_test_time'])],1)), axis=1)
+    Data['y_test'] = np.concatenate((Data['y_test'], np.expand_dims(Data['y_test'][:,int(args['y_col_test_event'])],1)), axis=1)
+    
+    print('Restructured Data. Total time elapsed: ' + str(time.time()-start_time) )        
 
     # %% 4. Split loaded TRAIN data into Tr/Val/(Test = 0) by PID
     if ('y_train' in Data.keys()):
@@ -239,55 +240,31 @@ def Run_Model(args):
         TE = 00
 
         # Per ID, find matching data rows      
-        Subj_IDs = Data_Y_Backup['y_train'][:,0]            
+        Subj_IDs = Data['y_train'][:,-3]            
         Subj_IDs_Unique = np.unique(Subj_IDs)
         
         #Speedup 08/14/24
-        Subj_ID_to_Rows_Dict = {} # map ID to rows
+        Subj_ID_to_Rows_Dict = {} # map ID to list of rows
         for ind,val in enumerate(Subj_IDs):
             if val in Subj_ID_to_Rows_Dict.keys():
                 Subj_ID_to_Rows_Dict[val].append(ind)
             else:
                 Subj_ID_to_Rows_Dict[val] = [ind]
-                
-        # Subj_ID_to_Rows_Dict = {} # map ID to rows
-        # for k in Subj_IDs_Unique:
-        #     Subj_ID_to_Rows_Dict[k] = np.where(Subj_IDs == k)[0] 
 
         # Split
         Train_Inds, Val_Inds, Test_Inds = Support_Functions.Data_Split_Rand( [k for k in range(len(Subj_IDs_Unique))], TR, VA, TE)
-
-        # Okay, now that we've split unique patient IDs we need to convert that back to ECG rows
-        # Train_Inds_ECG = []
-        # for k in Train_Inds:
-        #     Train_Inds_ECG = Train_Inds_ECG + [ m for m in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[k]] ]
-        # Faster equivalent. 0.05s instead of 213.
+        
+        # speedup 08/14/24
         Train_Inds_ECG  = [Row for PID in Train_Inds for Row in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[PID]] ]
-        
-        # Val_Inds_ECG = []
-        # for k in Val_Inds:
-        #     Val_Inds_ECG = Val_Inds_ECG + [ m for m in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[k]] ]
-        # Faster Equivalent
         Val_Inds_ECG  = [Row for PID in Val_Inds for Row in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[PID]] ]
-        
-        # Test_Inds_ECG = []
-        # for k in Test_Inds:
-        #     Test_Inds_ECG = Test_Inds_ECG + [ m for m in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[k]] ]
-        # Faster Equivalent
         Test_Inds_ECG = [Row for PID in Test_Inds for Row in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[PID]] ]
         
-        Train_Inds = Train_Inds_ECG
-        Val_Inds = Val_Inds_ECG
-        Test_Inds = Test_Inds_ECG
-            
-        Data['x_valid'] = Data['x_train'][Val_Inds]
-        Data['x_train'] = Data['x_train'][Train_Inds]
+        Data['x_valid'] = Data['x_train'][Val_Inds_ECG]
+        Data['x_train'] = Data['x_train'][Train_Inds_ECG]
     
-        Data['y_valid'] = Data['y_train'][Val_Inds]
-        Data['y_train'] = Data['y_train'][Train_Inds]
+        Data['y_valid'] = Data['y_train'][Val_Inds_ECG]
+        Data['y_train'] = Data['y_train'][Train_Inds_ECG]
         
-        Data_Y_Backup['y_valid'] = Data_Y_Backup['y_train'][Val_Inds]
-        Data_Y_Backup['y_train'] = Data_Y_Backup['y_train'][Train_Inds]
           
     else:
         print('No Data Split')
@@ -333,11 +310,6 @@ def Run_Model(args):
         Data['y_valid'] = Data['y_valid'][va_inds,:]
         Data['y_test'] = Data['y_test'][te_inds,:]
         
-        Data_Y_Backup['y_train'] = Data_Y_Backup['y_train'][tr_inds,:] 
-        Data_Y_Backup['y_valid'] = Data_Y_Backup['y_valid'][va_inds,:] 
-        Data_Y_Backup['y_test'] = Data_Y_Backup['y_test'][te_inds,:] 
-        
-        
     print('Got to model init. Total time elapsed: ' + str(time.time()-start_time) )
     if (Model_Type == 'InceptionTimeReg'):
         asdf = InceptionTimeRegression_PyCox.InceptionTimeRegression_PyCox(args, Data)
@@ -354,7 +326,6 @@ def Run_Model(args):
         asdf.Load(args['Load'])
     asdf.Train()
         
-    
     # %% Model Evaluation
     # To evaluate model we need: dicrete time points, discretized time to event, event 0/1, S(t) per time point
     
@@ -379,7 +350,7 @@ def Run_Model(args):
         surv_df.index = np.arange(num_durations)
         
         
-        # %% Generate and save out results
+        # %% Set up folders and save eval args
         
         # 1. Set up folders.
         # evals live in /trained_models/[train_data_folder]/Resnet18_Bob/Eval/[eval_data_folder]/output.csv
@@ -400,12 +371,14 @@ def Run_Model(args):
         with open(path, 'w') as file:
              file.write(json.dumps(args)) # use `json.loads` to do the reverse
              
-        # 3. Save out sample_time_points, testy_t, testy_e, s(t)
+        # %% Save out sample_time_points, testy_t, testy_e, s(t)
         outputs_hdf5_path = os.path.join(temp_path, 'Stored_Model_Output.hdf5')
         Save_to_hdf5(outputs_hdf5_path, sample_time_points, 'sample_time_points')
-        Save_to_hdf5(outputs_hdf5_path, disc_y_t, 'disc_y_t')
-        Save_to_hdf5(outputs_hdf5_path, disc_y_e, 'disc_y_e')
+        Save_to_hdf5(outputs_hdf5_path, disc_y_t, 'disc_y_t') # when it really happened
+        Save_to_hdf5(outputs_hdf5_path, disc_y_e, 'disc_y_e') # what really happened
+        Save_to_hdf5(outputs_hdf5_path, Data['y_test'], 'y_test')
         Save_to_hdf5(outputs_hdf5_path, surv, 'surv')
+        Save_to_hdf5(outputs_hdf5_path, Test_Col_Names + ['PID', 'TTE*', 'E*'], 'Test_Col_Names')
 
         # %%  Generate survival curves for model and kaplan-meier, bootstrapping patient selection(100x)
         print('Got to KM bootstraps. Total time elapsed: ' + str(time.time()-start_time) )
@@ -489,15 +462,19 @@ def Run_Model(args):
         
         # 1. find which data corresponds ot which patient ID
         if (args['Eval_Dataloader'] == 'Validation'):
-            Subj_IDs = Data_Y_Backup['y_valid'][:,0]    
+            Subj_IDs = Data['y_valid'][:,-3]    # PID lives in -3
+        elif (args['Eval_Dataloader'] == 'Train'):
+            Subj_IDs = Data['y_train'][:,-3]    
         else:
-            Subj_IDs = Data_Y_Backup['y_test'][:,0]    
-            
-        Subj_IDs_Unique = np.unique(Subj_IDs)
+            Subj_IDs = Data['y_test'][:,-3]  
         
+        Subj_IDs_Unique = np.unique(Subj_IDs)
         Subj_ID_to_Rows_Dict = {} # map ID to rows
-        for k in Subj_IDs_Unique:
-            Subj_ID_to_Rows_Dict[k] = np.where(Subj_IDs == k)[0] 
+        for ind,val in enumerate(Subj_IDs):
+            if val in Subj_ID_to_Rows_Dict.keys():
+                Subj_ID_to_Rows_Dict[val].append(ind)
+            else:
+                Subj_ID_to_Rows_Dict[val] = [ind]
         
         bootstrap_briers = [] # list of lists
         bootstrap_concordances = [] # list of lists

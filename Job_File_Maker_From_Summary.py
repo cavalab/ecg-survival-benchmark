@@ -31,7 +31,7 @@ my_data = np.genfromtxt(csv_path, delimiter=',', dtype=None)
 for i,k in enumerate(my_data[0]):
     print(i,k)
     
-headers = [str(k)[2:-1] for k in my_data[0,0:35]] # limit inputs to a column subset
+headers = [str(k)[2:-1] for k in my_data[0,0:36]] # limit inputs to a column subset
 
 
 
@@ -44,7 +44,7 @@ GPU = 'Any' # Quadro_RTX or Titan_RTX or Tesla_K or Tesla_T or NVIDIA_A40 or or 
 
 
 # any args you DONT want to copy over from the arg list
-skip_or_overwrite_args = ['Train','early_stop', 'Load', 'Model_Folder_Path', 'Eval_Dataloader', 'epoch_end', 'Best_Epoch', 'Min_Early_Stop_To_Not_Miss', 'num_durations'] #(['Model_Folder_Path'] is generated
+skip_or_overwrite_args = ['Train','early_stop', 'Load', 'Model_Folder_Path', 'Eval_Dataloader', 'epoch_end', 'Best_Epoch', 'Min_Early_Stop_To_Not_Miss', 'num_durations', 'Training Time'] #(['Model_Folder_Path'] is generated
 
 # any args you want to add to the arg list for everyone
 additional_args   = ['early_stop', 'Eval_Dataloader', 'Load', 'epoch_end','Train', 'num_durations']
@@ -53,17 +53,17 @@ additional_values = [-1,           'Test'           , 'Best',   '-1'     ,'True'
 # %% build job files per model
 for row in my_data[1:]: # skip the header
 
-    temp = str(row[1])[2:-1]
+    temp = str(row[0])[2:-1]
     Model_Name = temp.split('_')[0]
     Model_Name_Mod = '_'.join(temp.split('_')[1:])
     job_name = 'Run_'+str(Model_Name) + '_' +  Model_Name_Mod
     
     # set memory based on the dataset
-    test_dataset = print(str(row[0])[2:-1])
+    test_dataset = str(row[1])[2:-1]
     if (test_dataset == 'Code15'):
-        mem = 100
+        mem = 99
     else:
-        mem = 300
+        mem = 333
 
     String_List = []
     String_List = String_List_Add(String_List, '#!/bin/bash')
@@ -104,10 +104,12 @@ for row in my_data[1:]: # skip the header
     
     # And now we build the call
     if Model_Name in ['RibeiroReg', 'InceptionTimeReg']:
-        Sing_Cmd = 'singularity exec --nv Sing_Torch_05032024.sif python3 \'Model_Runner_PyCox.py\''
+        # Sing_Cmd = 'singularity exec --nv Sing_Torch_05032024.sif python3 \'Model_Runner_PyCox.py\''
+        Sing_Cmd = 'singularity exec --bind /lab-share --nv Sing_Torch_05032024.sif python3 \'Model_Runner_PyCox.py\''
         
     if Model_Name in ['RibeiroClass', 'InceptionClass']:
-        Sing_Cmd = 'singularity exec --nv Sing_Torch_05032024.sif python3 \'Model_Runner_SurvClass.py\''
+        # Sing_Cmd = 'singularity exec --nv Sing_Torch_05032024.sif python3 \'Model_Runner_SurvClass.py\''
+        Sing_Cmd = 'singularity exec --bind /lab-share --nv Sing_Torch_05032024.sif python3 \'Model_Runner_SurvClass.py\''
     
     print(Model_Name)
    

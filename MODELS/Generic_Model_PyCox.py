@@ -90,13 +90,14 @@ class Custom_Sampler(BatchSampler):
     This is re-created differently every epoch by the DataLoader
     """
     def __init__(self, y_data, batch_size):
+        # sampler gets 'data', so PID is in -3, event in -1, time in -2
         # 1. figure out length
         # 2. figure out which indices correspond to '0's (censor) and '1's  (event)
         self.num_samples = len(y_data)
         self.y_data = y_data
         self.batch_size = batch_size
-        self.Event_Inds = [i for i,k in enumerate(y_data[:,1]) if k==1.0]
-        self.Non_Event_Inds = [i for i,k in enumerate(y_data[:,1]) if k==0.0]
+        self.Event_Inds = [i for i,k in enumerate(y_data[:,-1]) if k==1.0]
+        self.Non_Event_Inds = [i for i,k in enumerate(y_data[:,-1]) if k==0.0]
         self.weights = torch.tensor([1.0 for k in range(y_data.shape[0])])
         self.default_order = False 
         
@@ -218,7 +219,7 @@ class Generic_Model_PyCox(GenericModel):
             self.prep_normalization_and_reshape_data(args, Data)
             # self.Data['x_train'] = Structure_Data_NCHW(self.Data['x_train'])
             # self.Prep_Normalization(args, self.Data)
-            self.max_duration = max(Data['y_train'][:,0])
+            self.max_duration = max(Data['y_train'][:,-2]) # time now lives @ -2
             self.labtrans = LogisticHazard.label_transform(self.num_durations)
             self.labtrans.fit_transform(np.array([0,self.max_duration]), np.array([0,1]))
 
@@ -239,24 +240,24 @@ class Generic_Model_PyCox(GenericModel):
             self.Data['x_train'] = Structure_Data_NCHW(self.Data['x_train'])
             self.Data['x_train'] = Normalize(torch.Tensor(self.Data['x_train']), self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
             if (self.Discretize):
-                self.Data['y_train'][:,0], self.Data['y_train'][:,1] = self.labtrans.transform(self.Data['y_train'][:,0], self.Data['y_train'][:,1])
-            self.train_dataset = Dataset_FuncList(self.Data['x_train'] , targets = self.Data['y_train'], func_list = func_list, discretize=self.Discretize)
+                self.Data['y_train'][:,-2], self.Data['y_train'][:,-1] = self.labtrans.transform(self.Data['y_train'][:,-2], self.Data['y_train'][:,-1]) # TTE lives in [:,-2], Event lives in [:,-1]
+            self.train_dataset = Dataset_FuncList(self.Data['x_train'] , targets = self.Data['y_train'][:,[-2,-1]], func_list = func_list, discretize=self.Discretize)
             self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset, batch_size = self.GPU_minibatch_limit, collate_fn=collate_fn, sampler=Custom_Sampler(self.Data['y_train'], self.GPU_minibatch_limit)) 
 
         if 'x_valid' in self.Data.keys():
             self.Data['x_valid'] = Structure_Data_NCHW(self.Data['x_valid'])
             self.Data['x_valid'] = Normalize(torch.Tensor(self.Data['x_valid']), self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
             if (self.Discretize):
-                self.Data['y_valid'][:,0], self.Data['y_valid'][:,1] = self.labtrans.transform(self.Data['y_valid'][:,0], self.Data['y_valid'][:,1])
-            self.val_dataset  = Dataset_FuncList(self.Data['x_valid']  , targets = self.Data['y_valid'], func_list = func_list, discretize=self.Discretize )
+                self.Data['y_valid'][:,-2], self.Data['y_valid'][:,-1] = self.labtrans.transform(self.Data['y_valid'][:,-2], self.Data['y_valid'][:,-1])
+            self.val_dataset  = Dataset_FuncList(self.Data['x_valid']  , targets = self.Data['y_valid'][:,[-2,-1]], func_list = func_list, discretize=self.Discretize )
             self.val_dataloader = torch.utils.data.DataLoader (self.val_dataset,  batch_size = self.GPU_minibatch_limit, collate_fn=collate_fn, sampler=Custom_Sampler(self.Data['y_valid'], self.GPU_minibatch_limit)) 
 
         if 'x_test' in self.Data.keys():
             self.Data['x_test'] = Structure_Data_NCHW(self.Data['x_test'])
             self.Data['x_test'] = Normalize(torch.Tensor(self.Data['x_test']), self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
             if (self.Discretize):
-                self.Data['y_test'][:,0],  self.Data['y_test'][:,1]  = self.labtrans.transform(self.Data['y_test'][:,0],  self.Data['y_test'][:,1])
-            self.test_dataset = Dataset_FuncList(self.Data['x_test'], targets = self.Data['y_test'], func_list = func_list, discretize=self.Discretize, Toggle='X') #Only returns X, not Y
+                self.Data['y_test'][:,-2],  self.Data['y_test'][:,-1]  = self.labtrans.transform(self.Data['y_test'][:,-2],  self.Data['y_test'][:,-1])
+            self.test_dataset = Dataset_FuncList(self.Data['x_test'], targets = self.Data['y_test'][:,[-2,-1]], func_list = func_list, discretize=self.Discretize, Toggle='X') #Only returns X, not Y
             self.test_dataloader = torch.utils.data.DataLoader (self.test_dataset,  batch_size = self.GPU_minibatch_limit, collate_fn=collate_fn, shuffle = False) #DO NOT SHUFFLE
         print('GenericModel_PyCox: Dataloader prep T = ', time.time() - a)
 
@@ -410,7 +411,7 @@ class Generic_Model_PyCox(GenericModel):
     def Run_NN (self, my_dataloader):
 
         if (self.args['pycox_mdl'] == 'CoxPH'):
-            self.pycox_mdl.compute_baseline_hazards(input=self.Adjust_Many_Images(self.Data['x_train'][:,0,:,:]),target=[self.Data['y_train'][:,0],self.Data['y_train'][:,1]],batch_size = self.GPU_minibatch_limit)
+            self.pycox_mdl.compute_baseline_hazards(input=self.Adjust_Many_Images(self.Data['x_train'][:,0,:,:]),target=[self.Data['y_train'][:,-2],self.Data['y_train'][:,-1]],batch_size = self.GPU_minibatch_limit)
            
         surv    = self.pycox_mdl.predict_surv(my_dataloader)
         surv_df = self.pycox_mdl.predict_surv_df(my_dataloader) # contains surv, also stores 'index' which is the time in years rather than discretized points
@@ -425,7 +426,7 @@ class Generic_Model_PyCox(GenericModel):
             # parse columns of input: [large] x 738. 
             # input columns align with output columns via 't2': ex: array([ 1,  1,  2,  3,  6, 10, 10]). 90 unique values.
             # where a time maps to a bin, fill that in, if there's a gap, fill in prev known value
-            Unique_Time_Points = np.unique(self.Data['y_train'][:,0])
+            Unique_Time_Points = np.unique(self.Data['y_train'][:,-2])
             t2, k = self.labtrans.transform(Unique_Time_Points, np.ones(Unique_Time_Points.shape))
             surv_out = np.ones( (my_dataloader.dataset.targets.shape[0],len(self.labtrans.cuts)), dtype=float)
             temp_col = surv[:,0]
@@ -438,7 +439,7 @@ class Generic_Model_PyCox(GenericModel):
                 surv_out[:,k] = temp_col       # after parsing all input columns m, we have the highest m <= k
 
             surv = surv_out
-            t, d = self.labtrans.transform(my_dataloader.dataset.targets[:,0].numpy(),my_dataloader.dataset.targets[:,1].numpy())
+            t, d = self.labtrans.transform(my_dataloader.dataset.targets[:,0].numpy(),my_dataloader.dataset.targets[:,1].numpy()) # In 'dataset', time lives at [:,0] and event lives at [:,1]
             surv_df = pd.DataFrame(data = np.transpose(surv), columns = [k for k in range(surv.shape[0])], index = self.labtrans.cuts )
 
         # if not pycox, you already have t,d discretized in Data[]

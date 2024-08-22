@@ -197,21 +197,21 @@ class GenericModel:
             self.Data['x_train']  = Structure_Data_NCHW(self.Data['x_train'])
             self.Data['x_train']  = Normalize(torch.Tensor(self.Data['x_train']), self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
             self.Data['y_train']  = np.float64(self.Data['y_train']) #8/6/24
-            self.train_dataset = Custom_Dataset( self.Data['x_train'] , self.Data['y_train'])
+            self.train_dataset = Custom_Dataset( self.Data['x_train'] , self.Data['y_train'][:,-1]) # modified event, e*, lives in -1
             self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset, batch_size = self.GPU_minibatch_limit, shuffle = True) # weighted sampler is mutually exclussive with shuffle = True
             
         if 'x_valid' in self.Data.keys():
             self.Data['x_valid']  = Structure_Data_NCHW(self.Data['x_valid'])
             self.Data['x_valid']  = Normalize(torch.Tensor(self.Data['x_valid']), self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
             self.Data['y_valid']  = np.float64(self.Data['y_valid']) #8/6/24
-            self.val_dataset = Custom_Dataset(self.Data['x_valid']  , self.Data['y_valid'] )
+            self.val_dataset = Custom_Dataset(self.Data['x_valid']  , self.Data['y_valid'][:,-1]) # modified event, e*, lives in -1
             self.val_dataloader = torch.utils.data.DataLoader (self.val_dataset,  batch_size = self.GPU_minibatch_limit, shuffle = False) #DO NOT SHUFFLE
 
         if 'x_test' in self.Data.keys():
             self.Data['x_test'] = Structure_Data_NCHW(self.Data['x_test'])
             self.Data['x_test']  = Normalize(torch.Tensor(self.Data['x_test']), self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
             self.Data['y_test']  = np.float64(self.Data['y_test']) #8/6/24
-            self.test_dataset  = Custom_Dataset(self.Data['x_test']  , self.Data['y_test'] )
+            self.test_dataset  = Custom_Dataset(self.Data['x_test']  , self.Data['y_test'][:,-1]) # modified event, e*, lives in -1
             self.test_dataloader = torch.utils.data.DataLoader (self.test_dataset,  batch_size = self.GPU_minibatch_limit, shuffle = False) #DO NOT SHUFFLE
         print('GenericModel: Dataloader prep T = ', time.time() - a)
 
@@ -282,7 +282,10 @@ class GenericModel:
             if ('Torch_Random_State' in Import_Dict.keys()):
                 np.random.set_state(Import_Dict['Numpy_Random_State'])
                 torch.random.set_rng_state(Import_Dict['Torch_Random_State'])
-                torch.cuda.random.set_rng_state(Import_Dict['CUDA_Random_State'])
+                if ('CUDA_Random_State' in Import_Dict.keys()):
+                    torch.cuda.random.set_rng_state(Import_Dict['CUDA_Random_State'])
+                else:
+                    print('CUDA RANDOM STATE NOT LOADED. Further training not deterministic')
                 torch.backends.cudnn.deterministic = True # make TRUE if you want reproducible results (slower)
             else:
                 print('Could not load random state')

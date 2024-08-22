@@ -31,11 +31,11 @@ import Model_Runner_SurvClass
 
 args  = '--Train_Folder MIMICIV_Multimodal_Subset' #MIMICIV_Multimodal_Subset
 # args += ' --Model_Name InceptionClass_MM11' #InceptionClass or RibeiroClass or FFClass
-args += ' --Model_Name TimesNetClass_1' #InceptionClass or RibeiroClass or FFClass or LSTMClass or TimesNetClass
-# args += ' --Load Best'                     # if you want to load a model you've trained before
+args += ' --Model_Name RibeiroClass_MM10' #InceptionClass or RibeiroClass or FFClass or LSTMClass or TimesNetClass
+args += ' --Load Best'                     # if you want to load a model you've trained before
 args += ' --Test_Folder MIMICIV_Multimodal_Subset'
 args += ' --batch_size 512'
-args += ' --epoch_end 5'                     # set to -1 if you don't want to train the model after initialization and loading
+args += ' --epoch_end -1'                     # set to -1 if you don't want to train the model after initialization and loading
 args += ' --validate_every 1'
 args += ' --Save_Out_Checkpoint True'
 args += ' --GPU_minibatch_limit 32'          # how many samples go to GPU at one time
@@ -54,7 +54,7 @@ args += ' --Rand_Seed 10'                    # Random seed
 args += ' --horizon 1'
 args += ' --Norm_Func nchW'                  # Normalize ECG per channel based on the training data set
 
-args += ' --debug True'                    # 'True' limits data to 1k samples of tr/val/test.
+args += ' --debug False'                    # 'True' limits data to 1k samples of tr/val/test.
 
 args = args.split(' ')
 Model_Runner_SurvClass.Run_Model_via_String_Arr(args)
@@ -68,7 +68,8 @@ import Model_Runner_PyCox
 args  = '--Train_Folder MIMICIV_Multimodal_Subset' #MIMICIV_Multimodal_Subset
 # args += ' --Model_Name InceptionClass_MM11' #InceptionClass or RibeiroClass or FFClass
 args += ' --Model_Name TimesNetReg_051624_4083406' #InceptionClass or RibeiroClass or FFClass or TimesNetReg
-# args += ' --Load Last'                     # if you want to load a model you've trained before
+args += ' --Load Best'                     # if you want to load a model you've trained before
+
 args += ' --Test_Folder MIMICIV_Multimodal_Subset'
 args += ' --batch_size 512'
 args += ' --epoch_end -1'                     # set to -1 if you don't want to train the model after initialization and loading
@@ -89,7 +90,7 @@ args += ' --Rand_Seed 10'                    # Random seed
 # args += ' --horizon 0.0822'                    # What time (years) models should try to optimize for [Classifier specific]
 # args += ' --horizon 1'
 
-args += ' --pycox_mdl LH'
+args += ' --pycox_mdl CoxPH'
 args += ' --Norm_Func nchW'                  # Normalize ECG per channel based on the training data set
 
 args += ' --debug False'                    # 'True' limits data to 1k samples of tr/val/test.

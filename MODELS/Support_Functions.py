@@ -320,13 +320,15 @@ def Save_to_hdf5(path, var, var_name):
         with h5py.File(path, "r+") as f:
             database_list = [k for k in f.keys()]
             if var_name in database_list:
-                tmp = f[var_name]
-                tmp = var
+                # updated 08/22/24
+                del f[var_name]
+                f.create_dataset(var_name, data = var)
                 print('updated ' + var_name)
             else:
                 f.create_dataset(var_name, data = var)
                 print('saved ' + var_name)
-                
+
+# %%              
 # def debug_load():
 #     old_model = copy.deepcopy(self.model)
 #     old_np_state = np.random.get_state()
@@ -345,4 +347,13 @@ def Save_to_hdf5(path, var, var_name):
 #     if (torch.equal(old_torch_state, torch.get_rng_state()) == False): # random state is different
 #         print('Torch rand err')    
     
-    
+#  %% Interrogate hdf5
+# C:\Users\ch242985\Desktop\ECG\CNN\Trained_Models\MIMICIV_Multimodal_Subset\TimesNetClass_1\EVAL\MIMICIV_Multimodal_Subset Test_Folder
+
+# import h5py
+# import os
+# with h5py.File('Stored_Model_Output.hdf5', "r") as f:
+#     print(f.keys())
+#     for key in f.keys():
+#         print(f[key][()].shape)
+        
