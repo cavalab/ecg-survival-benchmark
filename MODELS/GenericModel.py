@@ -387,7 +387,7 @@ class GenericModel:
 
                 imgs = imgs.to(self.device)
                 imgs = imgs.to(torch.float32) # convert to float32 AFTER putting on GPU
-                imgs = Normalize(imgs, self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
+                # imgs = Normalize(imgs, self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
                 imgs = self.Adjust_Many_Images(imgs)
                 
                 labels = labels.to(self.device)
@@ -476,7 +476,7 @@ class GenericModel:
         for i, (imgs , labels) in enumerate(my_dataloader):
             imgs = imgs.to(self.device)
             imgs = imgs.to(torch.float32) # convert to float32 AFTER putting on GPU
-            imgs = Normalize(imgs, self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
+            # imgs = Normalize(imgs, self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
             imgs = self.Adjust_Many_Images(imgs)
             
             labels = labels.to(self.device)
