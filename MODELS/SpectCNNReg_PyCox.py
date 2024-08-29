@@ -6,21 +6,33 @@
 # Heavily modified by PVL to line up with the rest of the survival modeling flow
 # Where possible, the original code was kept
 
-import numpy as np 
-import time
+import torch
+import os
+from tqdm import tqdm
 
-import torch 
+import torchaudio
+
+import torch
 import torch.nn as nn
-import torch.nn.functional as F 
-
+from copy import deepcopy
+from torchvision import transforms, models
+from tqdm import tqdm
 import matplotlib.pyplot as plt
-from collections import OrderedDict
+import numpy as np
+import time
+import os
 
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import confusion_matrix, accuracy_score, f1_score
-from sklearn.preprocessing import RobustScaler
+from MODELS.GenericModel import GenericModel
 
-from MODELS.InceptionTime_Support import Inception, InceptionBlock
+# import Support_Functions
+from MODELS.Support_Functions import Custom_Dataset
+from MODELS.Support_Functions import Save_NN
+from MODELS.Support_Functions import Save_Train_Args
+from MODELS.Support_Functions import Structure_Data_NCHW
+from MODELS.Support_Functions import Get_Norm_Func_Params
+from MODELS.Support_Functions import Normalize
+from MODELS.Support_Functions import Get_Loss_Params
+from MODELS.Support_Functions import Get_Loss
 
 
 # %%
@@ -39,48 +51,49 @@ from MODELS.Support_Functions import Structure_Data_NCHW
 import torchtuples as tt
 from pycox.models import LogisticHazard
         
-def InceptionTime(in_channels, Kernel_Mult = 1):
-    # *** MODEL
+class Spect_CNN(nn.Module):
+    # just wrapping the LSTM here to return the correct h/c outputs, not the outputs per ECG time point
+    # https://discuss.pytorch.org/t/cnn-lstm-for-video-classification/185303/7
     
-    Kernel_Width_Base = [10,20,40]
-    InceptionTime = nn.Sequential(
-                        # Reshape(out_shape=(1,4096)), # I'm not sure this is necessary? PVL 12/14/23
-                        InceptionBlock(
-                            in_channels=in_channels, 
-                            n_filters=32, 
-                            kernel_sizes=[(k*Kernel_Mult)+1 for k in Kernel_Width_Base],
-                            bottleneck_channels=32,
-                            use_residual=True,
-                            activation=nn.ReLU()
-                        ),
-                        InceptionBlock(
-                            in_channels=32*4, 
-                            n_filters=32, 
-                            kernel_sizes=[(k*Kernel_Mult)+1 for k in Kernel_Width_Base],
-                            bottleneck_channels=32,
-                            use_residual=True,
-                            activation=nn.ReLU()
-                        ),
-                        nn.AdaptiveAvgPool1d(output_size=1),
-                        nn.Flatten(),
-                        # Flatten(out_features=32*4*1),
-                        nn.Linear(in_features=4*32*1, out_features=1)
+    def __init__ (self, output_size):
+        super(Spect_CNN, self).__init__()
+        
+        self.model = nn.Sequential(
+            nn.Conv2d(12, 32, (4,4)),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=(2,2)),
+            
+            nn.Conv2d(32, 64, (2,2)),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=(2,2)),
+            
+            nn.Conv2d(64, 64, (2,2)),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=(2,2)),
+            
+            nn.Flatten(),
+            nn.Dropout(),
+            nn.Linear(in_features = 246016, out_features = output_size)
             )
-    
-    return InceptionTime
+        
+        self.Spect = torchaudio.transforms.MelSpectrogram(sample_rate = 400, n_mels = 512, n_fft=1024, hop_length=8).to('cuda')
+        
 
-class InceptionTimeRegression_PyCox(Generic_Model_PyCox):
+    def forward(self, input_ecg):
+        # hmm. looks like PyCox adds a squeeze in dataloader outputs.
+        # ... but only when training. 
+        
+        a = self.Spect( torch.transpose( input_ecg,2,1)) # NCHW 32 x 12 x 512 x 513
+        ret = self.model(a[:,:,:,:512]) # cut last freq to line up size
+        return ret # output is N x output_shape
 
+
+class SpectCNNReg_PyCox(Generic_Model_PyCox):
     def __init__(self, args, Data):
+        
+        
         # Generic_Model_PyCox init: 1) Process Args 
         self.Process_Args_PyCox(args) # process common arguments, determine number of output classes
-        
-        # Extra processing on args
-        if ('K_M' in args.keys()):
-            self.K_M = int(args['K_M'])
-        else:
-            self.K_M = 1
-            print('defaulting to kernel mult of 1. InceptionTime kernel sizes are 10,20,40')
 
         # Generic_Model_PyCox init: 2) Prep Normalization 
         self.Prep_Data_Normalization_Discretization(args, Data) # sets num_durations, frontloads normalization and discretization, self.Data = Data
@@ -90,13 +103,11 @@ class InceptionTimeRegression_PyCox(Generic_Model_PyCox):
             self.Process_Data_To_Dataloaders()
             
         # Generic_Model_PyCox init: 4) Prep a model, send to device
-        if 'x_train' in Data.keys():
-            in_channels = Data['x_train'].shape[-1]
-            self.model = InceptionTime(in_channels=in_channels, Kernel_Mult = self.K_M)
-            if 'y_train' in Data.keys():
-                self.model[-1] = nn.Linear(in_features=4*32*1, out_features=self.Num_Classes, bias=True) # self.Num_Classes is set in Generic_Model_PyCox
-            self.model.to(self.device)
-            self.pycox_mdl = self.Get_PyCox_Model() # init the optimizer and scheduler
+        
+        self.model = Spect_CNN(self.Num_Classes)
+        
+        self.model.to(self.device)
+        self.pycox_mdl = self.Get_PyCox_Model() # init the optimizer and scheduler
 
         
 
@@ -140,9 +151,10 @@ class InceptionTimeRegression_PyCox(Generic_Model_PyCox):
                 
     # %%Overwrite how we adjust _each_ input and _multiple_ inputs. InceptionTime wants a different shape for data (not NCHW but NHW)
     def Adjust_Image(self, single_image):
-        single_image = torch.transpose(single_image, 1,2)
+        # single_image = torch.transpose(single_image, 1,2)
         return single_image[0] # Just chan x leng, so 12 x 4k
+        # return single_image
     
     def Adjust_Many_Images(self, many_images):
-        many_images = torch.transpose(many_images, 1,2)
+        # many_images = torch.transpose(many_images, 1,2)
         return many_images # Just chan x leng, so 12 x 4k

@@ -144,7 +144,7 @@ class Ribeiro_Classifier(GenericModel):
         Import_Dict = self.Load_Checkpoint(best_or_last)   
         self.Load_Training_Params(Import_Dict)
         self.Load_Training_Progress(Import_Dict)
-        # self.Load_Normalization(Import_Dict) # we're frontloading normalization, so that doesn't matter
+        self.Load_Normalization(Import_Dict) # we're frontloading normalization, so that doesn't matter
 
         # self.single_model_init()
         # self.Try_LSTM_Wrap() # have LSTM wrap this model

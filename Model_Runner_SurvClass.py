@@ -68,17 +68,32 @@ Currently, all models reshape it into N-C-H-W
 # handle pycox folder requirement FIRST
 import os 
 os.environ['PYCOX_DATA_DIR'] = os.path.join(os.getcwd(),'Mandatory_PyCox_Dir') # next line requires this. it's a bad init call.
-from pycox.utils import kaplan_meier
 
-from MODELS import Support_Functions
+
+from Model_Runner_Support import Load_Data
+from Model_Runner_Support import Clean_Data
+from Model_Runner_Support import Apply_Horizon
+from Model_Runner_Support import Split_Data
+from Model_Runner_Support import DebugSubset_Data
+from Model_Runner_Support import set_up_train_folders
+from Model_Runner_Support import set_up_test_folders
+
+# evaluation wrappers
+from Model_Runner_Support import Gen_KM_Bootstraps
+from Model_Runner_Support import Gen_Concordance_Brier_No_Bootstrap
+from Model_Runner_Support import Gen_Concordance_Brier_PID_Bootstrap
+from Model_Runner_Support import Gen_AUROC_AUPRC
+from Model_Runner_Support import print_classifier_ROC
+from Model_Runner_Support import save_histogram
+
 from MODELS import InceptionTimeClassifier
 from MODELS import Ribeiro_Classifier
 from MODELS import FFClass
 from MODELS import LSTMClass
 from MODELS import TimesNetClass
+from MODELS import SpectCNNClass
 
-from MODELS.Support_Functions import get_surv_briercordance # only get useful time points (bootstraps)
-from MODELS.Support_Functions import get_AUROC_AUPRC
+
 from MODELS.Support_Functions import Save_to_hdf5
 
 
@@ -88,7 +103,6 @@ import matplotlib.pyplot as plt
 from sksurv.linear_model import CoxPHSurvivalAnalysis
 from scipy.special import softmax 
 
-import h5py
 import numpy as np
 import torch
 import time
@@ -129,15 +143,6 @@ def Run_Model(args):
     # input is paired dict of strings named args
     start_time = time.time()
     
-    #%%0. Toggleable speedup for debug
-    debug  = False
-    if ('debug' in args.keys()):
-        if args['debug'] == 'True':
-            debug = True
-            sub_len = 1000
-            if (debug):
-                print("Debug speedup! only using "+str(sub_len)+' elems of tr/val/test!')
-
     # %% 1. CUDA check
     # CUDA
     for i in range(torch.cuda.device_count()):
@@ -173,191 +178,27 @@ def Run_Model(args):
     torch.manual_seed(args['Rand_Seed'])
     torch.backends.cudnn.deterministic = True # make TRUE if you want reproducible results (slower)
     
-    # %% 4. Data load - NeurIPS simplified. Assume we are pulling from 'train_folder' and 'test_folder'
-    Data = {}
-    datapath1 = os.path.dirname(os.getcwd()) # cleverly jump one one folder without referencing \\ (windows) or '/' (E3)
-    with h5py.File(os.path.join(datapath1,'HDF5_DATA',args['Train_Folder'],'TRAIN_DATA','Train_Data.hdf5'), "r") as f:
-        Data['x_train'] = f['x'][()]
-        Data['y_train'] = f['y'][()]
-        Train_Col_Names = [k.decode('UTF-8') for k in f['column_names'][()]]
+    # %% Process data: Load, Clean, Split
+    Data, Train_Col_Names, Test_Col_Names = Load_Data(args)       # Data is a dict, so passed by reference from now on
+    Clean_Data(Data, args)       # remove TTE<0 and NaN ECG
+    Apply_Horizon(Data, args)    # classifiers need to compact TTE and E into a single value, E*. Augments Data['y_'] for model train/runs without overwriting loaded information.
+    Split_Data(Data)             # splits 'train' data 80/20 into train/val by PID
+    DebugSubset_Data(Data, args) # If args['debug'] == True, limits Data[...] to 1k samples each of tr/val/test.
     
-    with h5py.File(os.path.join(datapath1,'HDF5_DATA',args['Test_Folder'],'TEST_DATA','Test_Data.hdf5'), "r") as f:
-        Data['x_test'] = f['x'][()]
-        Data['y_test'] = f['y'][()] 
-        Test_Col_Names = [k.decode('UTF-8') for k in f['column_names'][()]]
-        
-    print('Loaded Train and Test. Total time elapsed: ' + str(time.time()-start_time) )
-        
-                
-    
-    # %% 5 Data clean
-    # Sometimes time-to-event is '-1.0' meaning no follow up time.
-    # Sometimes TTE < 0 (recording error?)
-    # Find and trash those indices    
-    for key in ['y_train', 'y_test']:
-        if ( (key in Data.keys()) and (len(Data[key].shape) > 1) ):
-            x_key = 'x' + key[1:]
-            
-            # mark negative TTE
-            neg_inds = np.where(Data[key][:,int(args['y_col_train_time'])] < 0)[0]
-            inds_to_del = neg_inds.tolist()
-            
-            # mark nan traces (5x faster)
-            for i in range(Data[x_key].shape[0]):
-                if (np.isnan(Data[x_key][i]).any()):
-                    if i not in inds_to_del:
-                        inds_to_del.append(i)
-            
-            # mark nan traces (pre 8/14/24)
-            # nan_inds = np.where(np.sum(np.sum(np.isnan(Data[x_key]),axis=2),axis=1) > 0)[0]
-            # for k in nan_inds:
-            #     if k not in inds_to_del:
-            #         inds_to_del.append(k)
-            
-                     
-            # remove data, avoid calling np.delete on Data cause that doubles RAM - just select the indices to keep instead
-            if (len(inds_to_del) > 0):
-                print('removing ' + str(len(inds_to_del)) + ' inds with nan or negative time')
-                inds_to_keep = np.delete( np.arange(Data[key].shape[0]), inds_to_del )
-                Data[x_key] = Data[x_key][inds_to_keep] 
-                Data[key] = Data[key][inds_to_keep] 
-            
-    print('Checked data for negative time and nan ECG. Total time elapsed: ' + str(time.time()-start_time) )
-
-    # %% 7. Horizoning
-    # We want our model to determine whether an event occurs by time H, trained with a classifier loss function.
-    # later, we'll build cox models on the output and evaluate those survival functions on the actual data 
-    # needs args['y_col_train_time'],args['y_col_train_event'],args['y_col_test_time'],args['y_col_test_event']
-    assert('horizon' in args.keys())
-    assert('y_col_train_time' in args.keys())
-    assert('y_col_train_event' in args.keys())
-    assert('y_col_test_time' in args.keys())
-    assert('y_col_test_event' in args.keys())
-    
-    # expand Data['y_train'] with extra columns showing PID, TTE*, and E*, where TTE* and E* are the times/events we are training on. Don't modify original TTE/E, which we evaluate survival models on.
-    assert ( ('y_train' in Data.keys()) and (len(Data['y_train'].shape) > 1) )
-    print('model_runner_survclass_seq: limiting training TTE to time horizon! assuming class 1 if event by H, else 0 (incl censor)')
-    
-    horizon = float(args['horizon'])
-    times_below_h = Data['y_train'][:,int(args['y_col_train_time'])] <= horizon
-    event = abs (Data['y_train'][:,int(args['y_col_train_event'])] -1) < 1e-4
-    event_mod = (times_below_h*event).astype(int) # did event happen? Leave a (k,) shape array
-    
-    # expand y_train - append PID, TTE*, E* @ column inds [-3,-2,-1], respectively
-    Data['y_train'] = np.concatenate((Data['y_train'], np.expand_dims(Data['y_train'][:,0],1)), axis=1)
-    Data['y_train'] = np.concatenate((Data['y_train'], np.expand_dims(Data['y_train'][:,int(args['y_col_train_time'])],1)), axis=1)
-    Data['y_train'] = np.concatenate((Data['y_train'], np.expand_dims(event_mod,1)), axis=1)
-
-    # Do the same for Data['y_test]
-    assert ( ('y_test' in Data.keys()) and (len(Data['y_test'].shape) > 1) )
-    print('model_runner_survclass_seq: limiting test TTE to time horizon! assuming class 1 if event by H, else 0 (incl censor)')
-
-    horizon = float(args['horizon'])
-    times_below_h = Data['y_test'][:,int(args['y_col_test_time'])] <= horizon
-    event = abs (Data['y_test'][:,int(args['y_col_test_event'])] -1) < 1e-4
-    event_mod = (times_below_h*event).astype(int) # did event happen? Leave a (k,) shape array
-    
-    # expand y_test - append PID, TTE*, E* @ column inds [-3,-2,-1], respectively
-    Data['y_test'] = np.concatenate((Data['y_test'], np.expand_dims(Data['y_test'][:,0],1)), axis=1)
-    Data['y_test'] = np.concatenate((Data['y_test'], np.expand_dims(Data['y_test'][:,int(args['y_col_test_time'])],1)), axis=1)
-    Data['y_test'] = np.concatenate((Data['y_test'], np.expand_dims(event_mod,1)), axis=1)
-
-    print('Computed event marker for horizon. Total time elapsed: ' + str(time.time()-start_time) )
-
-    # %% 8. Split loaded "training" data RANDOMLY BY PATIENT ID
-    if ('y_train' in Data.keys()):
-        
-        # NeurIPS version - split Training dataset 80 / 20 into Tr/Val
-        TR = 80
-        VA = 20
-        TE = 00
-        
-        # Per ID, find matching data rows      
-        Subj_IDs = Data['y_train'][:,-3]        # PID is now at -3    
-        Subj_IDs_Unique = np.unique(Subj_IDs)
-        
-        #Speedup 08/14/24
-        Subj_ID_to_Rows_Dict = {} # map ID to rows
-        for ind,val in enumerate(Subj_IDs):
-            if val in Subj_ID_to_Rows_Dict.keys():
-                Subj_ID_to_Rows_Dict[val].append(ind)
-            else:
-                Subj_ID_to_Rows_Dict[val] = [ind]
-                
-        # Subj_ID_to_Rows_Dict = {} # map ID to rows
-        # for k in Subj_IDs_Unique:
-        #     Subj_ID_to_Rows_Dict[k] = np.where(Subj_IDs == k)[0] 
-
-        # Split
-        Train_Inds, Val_Inds, Test_Inds = Support_Functions.Data_Split_Rand( [k for k in range(len(Subj_IDs_Unique))], TR, VA, TE)
-
-        # Speedup 08/14/24
-        Train_Inds_ECG  = [Row for PID in Train_Inds for Row in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[PID]] ]
-        Val_Inds_ECG  = [Row for PID in Val_Inds for Row in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[PID]] ]
-        # Test_Inds_ECG = [Row for PID in Test_Inds for Row in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[PID]] ]
-        
-        Data['x_valid'] = Data['x_train'][Val_Inds_ECG]
-        Data['x_train'] = Data['x_train'][Train_Inds_ECG]
-    
-        Data['y_valid'] = Data['y_train'][Val_Inds_ECG]
-        Data['y_train'] = Data['y_train'][Train_Inds_ECG]
-          
-    else:
-        print('No Data Split')
-    
-    print('Split Train into Train/Valid. Total time elapsed: ' + str(time.time()-start_time) )                            
-        
     # %% 9. set up trained model folders if they  don't exist
+    set_up_train_folders(args)
 
-    # trained models live in /trained_models/[train_data_folder]/Resnet18_Bob/asdf.pt
-    # evals live in /trained_models/[train_data_folder]/Resnet18_Bob/Eval/[Eval_data_folder]/output.csv    
+    # %% 10. Select model, (maybe) load an existing model. ask for training (runs eval after training reqs met)
+    print('Model_Runner: Got to init. Total time elapsed: ' + str(time.time()-start_time) )
     
-    # Set up Trained_Models folder
-    temp_path = os.path.join(os.getcwd(),'Trained_Models')
-    if ( (os.path.exists(temp_path) == False)):
-        os.mkdir(temp_path)
-    
-    # Set up Trained_Models/[Train_Folder]
-    temp_path = os.path.join(temp_path, args['Train_Folder'])
-    if ( (os.path.exists(temp_path) == False)):
-        os.mkdir(temp_path)
-        
-    # Set up and remember Trained_Models/[Train Folder]/[Model_Name]
-    Model_Folder_Path = os.path.join(temp_path, args['Model_Name'])
-    if (os.path.exists(Model_Folder_Path) == False):
-        os.mkdir(Model_Folder_Path)
-    
-    args['Model_Folder_Path'] = Model_Folder_Path # pass model folder path to model to save out checkpoints / eval
-    
-    
-    # %% 10. Select model, (maybe) train, and run
-    # # Speedup debugging?
-    if (debug):
-        print('!!!debug!!! Reducing data size!')
-        breakpoint()
-        tr_inds = np.random.randint(0, Data['x_train'].shape[0], (sub_len))
-        va_inds = np.random.randint(0, Data['x_valid'].shape[0], (sub_len))
-        te_inds = np.random.randint(0, Data['x_test'].shape[0], (sub_len))
-        
-        Data['x_train'] = Data['x_train'][tr_inds,:]
-        Data['x_valid'] = Data['x_valid'][va_inds,:]
-        Data['x_test'] = Data['x_test'][te_inds,:]
-        
-        Data['y_train'] = Data['y_train'][tr_inds]
-        Data['y_valid'] = Data['y_valid'][va_inds]
-        Data['y_test'] = Data['y_test'][te_inds]
-        
-        
-    # %% 10. Select model, (maybe) train, and run
-         
-    print('Got to init. Total time elapsed: ' + str(time.time()-start_time) )
     if (Model_Type == 'InceptionClass'):
         asdf = InceptionTimeClassifier.InceptionTimeClassifier(args, Data)
+        
     if (Model_Type == 'RibeiroClass'):
         asdf = Ribeiro_Classifier.Ribeiro_Classifier(args, Data)
         
-    if (Model_Type == 'Resnet18'):
-        asdf = CV_Resnet18_Classifier_Flip.CV_Resnet18_Classifier_Flip(args, Data)
+    # if (Model_Type == 'Resnet18'):
+    #     asdf = CV_Resnet18_Classifier_Flip.CV_Resnet18_Classifier_Flip(args, Data)
         
     if (Model_Type == 'FFClass'):
         asdf = FFClass.FFClass(args, Data)
@@ -368,84 +209,64 @@ def Run_Model(args):
     if (Model_Type == 'TimesNetClass'):        
         asdf = TimesNetClass.TimesNetClass(args, Data)
         
-    print('Got to Train. Total time elapsed: ' + str(time.time()-start_time) )
+    if (Model_Type == 'SpectCNNClass'):
+        asdf = SpectCNNClass.SpectCNNClass(args, Data)
+        
+    print('Model_Runner:  Got to Train. Total time elapsed: ' + str(time.time()-start_time) )
     if( ('Load' in args.keys())):
         asdf.Load(args['Load'])
     asdf.Train()
         
 
-    # %% 11. Generate and save out results    
     if ('Test_Folder' in args.keys()):
+    # %% 11. Generate and save out results   
+    # Per new plan 8/29/24, classifier models save out the softmax'd outputs for class '1' (event happened) on VAL and TEST
+    # Those will be stored along with data[y_] for VAL and TEST
+    # ... so we can add covariates to the cox regressions (built on VAL) without engaging GPU
         print('got to eval. Total Time elapsed: ' + str(time.time()-start_time))
         
-        # get test, validation outputs
-        if ('Eval_Dataloader' in args.keys()): # This lets you evaluate the model on its validation set instead of test set
-            test_outputs, test_Loss, test_correct_outputs = asdf.Test(Which_Dataloader = args['Eval_Dataloader'])
-        else:
-            test_outputs, test_Loss, test_correct_outputs = asdf.Test()
+        # get model outputs for test, validation sets (unshuffled)
+        if ('Eval_Dataloader' not in args.keys()): # This lets you evaluate the model on its validation set instead of test set
+            args['Eval_Dataloader'] = 'Test'
+        test_outputs, test_Loss, test_correct_outputs = asdf.Test(Which_Dataloader = args['Eval_Dataloader'])
         val_outputs, val_Loss, val_correct_outputs    = asdf.Test(Which_Dataloader = 'Validation')
-    
+        # plt.plot(val_correct_outputs - Data['y_valid'][:,-1]) # to check shuffle
+        
         # adjust output formats
         val_outputs  = np.squeeze(val_outputs)
         test_outputs = np.squeeze(test_outputs)
-        test_correct_outputs = np.squeeze(np.array(test_correct_outputs))
-        val_correct_outputs = np.squeeze(np.array(val_correct_outputs))
-
-        # %%
-        # 12. Set up folders.
-        # evals live in /trained_models/[train_data_folder]/Resnet18_Bob/Eval/[eval_data_folder]/output.csv
         
-        # Set up .../Eval
-        temp_path = os.path.join(Model_Folder_Path, 'EVAL')
-        if (os.path.isdir(temp_path) == False):
-            os.mkdir(temp_path)
-            
-        # Set up .../Eval/eval_data_folder
-        temp_path = os.path.join(temp_path, args['Test_Folder'] + ' Test_Folder')  
-        if (os.path.isdir(temp_path) == False):
-            os.mkdir(temp_path)
-            
-        # Save out Evaluation Args
-        path = os.path.join(temp_path, 'Eval_Args.txt')
-        with open(path, 'w') as file:
-             file.write(json.dumps(args)) # use `json.loads` to do the reverse
-             
-        # Plot argmax == correct
-        # fig1, ax = plt.subplots()
-        # if len(test_outputs.shape) > 1: # if this is a classifier, return argmax
-        #     test_argmax = np.array(test_outputs).argmax(axis=1) # argmax
-            
-        #     # let's do accuracy per class?
-        #     ACC = [ sum([1 for k in range(len(test_argmax)) if (test_argmax[k]==m and test_argmax[k]==test_correct_outputs[k])]) / sum([1 for k in range(len(test_correct_outputs)) if test_correct_outputs[k] == m]) for m in np.unique(test_correct_outputs)]
-        #     ax.bar(np.unique(test_correct_outputs),ACC)
-        #     ax.set(xlabel='correct output', ylabel = 'accuracy')
-        #     print("accuracy per class: ")
-        #     print ( [k for k in zip(np.unique(test_correct_outputs),np.array(ACC))] )
-        #     print("\n")
-        # else:
-        #     ax.scatter(test_correct_outputs, test_outputs)
-        #     ax.set(xlabel='correct output', ylabel = 'predicted output')
+        # softmax the outputs
+        val_outputs = np.array([softmax(k)[1] for k in val_outputs])
+        test_outputs = np.array([softmax(k)[1] for k in test_outputs])
         
-        # ax.set_title(args['Model_Name'])
-        # plot_file_path = os.path.join(temp_path, 'Classifier Output.pdf')
-        # fig1.savefig(plot_file_path)
+        # Set up Folders
+        set_up_test_folders(args)
+        
+        
+        # Save out smx val/test model outputs + the labels ( [PID, TTE*, E*] are last three cols, model was trained on TTE*,E*)
+        # From this we can recreate Cox models later
+        tmp = os.path.join(args['Model_Eval_Path'], 'Classif_Outputs_and_Labels.hdf5')
+        Save_to_hdf5(tmp, val_outputs, 'val_outputs')
+        Save_to_hdf5(tmp, test_outputs, 'test_outputs')
+        Save_to_hdf5(tmp, Data['y_valid'], 'y_valid')
+        Save_to_hdf5(tmp, Data['y_test'], 'y_test')
         
         # %% 13. Run Cox models
-        
-        # since we care about survival modeling, we're going to fit a cox  model on the VALIDATION set
-        # then evaluate it on the TEST set
+        # fit a Cox model on the VALIDATION set, evaluate on TEST set
         # 1. convert risk prediction (0-1)  to survival curves per subject
-        # 2. measure concordance, brier, AUPRC, AUROC, over 100 time points
+        # 2. measure concordance, brier, AUPRC, AUROC, etc.
+        # NoteL Cox models are built on un-horizoned labels, even if the classifiers are trained on horizoned labels
+        # (so this task uses all the time data, but the classifiers can only handle the one target)
 
         # build CoxPH curves on validation data
-        zcxv = CoxPHSurvivalAnalysis() 
+        zxcv = CoxPHSurvivalAnalysis() 
         a = Data['y_valid'][:,[int(args['y_col_train_event']) ]].astype(bool)   # CoxPH is built on if/when the event actually happened
         b = Data['y_valid'][:,[int(args['y_col_train_time']) ]]                 # shouldn't this also be limited?
         tmp = np.array([ (a[k],b[k][0]) for k in range(a.shape[0]) ], dtype = [('event',bool),('time',float)] )
-        val_outputs = np.array([softmax(k)[1] for k in val_outputs])
-        zcxv.fit(np.expand_dims(val_outputs,-1), tmp   )
+        zxcv.fit(np.expand_dims(val_outputs,-1), tmp   )
         
-        # prep eval data - evaluate on if/when things actually happen
+        # prep evaluation data - evaluate on if/when things actually happen
         if (args['Eval_Dataloader'] == 'Train'):
             disc_y_e = Data['y_train'][:,[int(args['y_col_train_event']) ]].astype(bool) # prep event
             disc_y_t = Data['y_train'][:,[int(args['y_col_train_time']) ]] # prep time
@@ -458,192 +279,51 @@ def Run_Model(args):
             disc_y_e = Data['y_test'][:,[int(args['y_col_test_event']) ]].astype(bool) # prep event
             disc_y_t = Data['y_test'][:,[int(args['y_col_test_time']) ]] # prep time
     
-        test_outputs = np.array([softmax(k)[1] for k in test_outputs])
-        
-
         # %% 14. Prep everything to match PyCox analysis
         # sample survival functions at a set of times (to compare to direct survival moels)
         upper_time_lim = max( b )[0] # the fit is limited to validation end times, so do 100 bins of tha
         sample_time_points = np.linspace(0, upper_time_lim, 100).squeeze()
         
-        surv_funcs = zcxv.predict_survival_function(np.expand_dims(test_outputs,-1))
+        surv_funcs = zxcv.predict_survival_function(np.expand_dims(test_outputs,-1))
         surv = np.squeeze(  np.array([k(sample_time_points) for k in surv_funcs]))
         
-        disc_y_e_bool = disc_y_e.squeeze()
         disc_y_e = disc_y_e.astype(int).squeeze()
         disc_y_t = np.array([np.argmax(sample_time_points>=k) if k<=upper_time_lim else len(sample_time_points)-1 for k in disc_y_t]) # bin times. none should appear in bin 0
         
-        surv_df = pd.DataFrame(np.transpose(surv)) # already discretized, so concordance measures should go well
+        surv_df = pd.DataFrame(np.transpose(surv)) 
         
-        # %% Save out sample_time_points, testy_t, testy_e, s(t)
-        outputs_hdf5_path = os.path.join(temp_path, 'Stored_Model_Output.hdf5')
-        Save_to_hdf5(outputs_hdf5_path, sample_time_points, 'sample_time_points')
-        Save_to_hdf5(outputs_hdf5_path, disc_y_t, 'disc_y_t') # when it really happened
-        Save_to_hdf5(outputs_hdf5_path, disc_y_e, 'disc_y_e') # what really happened
-        Save_to_hdf5(outputs_hdf5_path, Data['y_test'], 'y_test')
-        Save_to_hdf5(outputs_hdf5_path, surv, 'surv')
-        Save_to_hdf5(outputs_hdf5_path, Test_Col_Names + ['PID', 'TTE*', 'E*'], 'Test_Col_Names')
+        # %% 15. Save out everything we need to recreate evaluation: 
+        hdf5_path = os.path.join(args['Model_Eval_Path'], 'Stored_Model_Output.hdf5')
+        Save_to_hdf5(hdf5_path, sample_time_points, 'sample_time_points')
+        Save_to_hdf5(hdf5_path, disc_y_e, 'disc_y_e') # what really happened
+        Save_to_hdf5(hdf5_path, disc_y_t, 'disc_y_t') # when it really happened, discretized
+        Save_to_hdf5(hdf5_path, Data['y_test'], 'y_test')
+        Save_to_hdf5(hdf5_path, surv, 'surv')
+        Save_to_hdf5(hdf5_path, Test_Col_Names + ['PID', 'TTE*', 'E*'], 'Test_Col_Names')
 
-        # %% 15. Save out KM. Add bootstrapping (20x)
-        print('Got to KM bootstraps. Total time elapsed: ' + str(time.time()-start_time) )
+        print('Model_Runner: Generated survival curves. Total time elapsed: ' + str(time.time()-start_time) )
         
-        # Bootstrap
-        km_outs = []
-        mdl_outs = []
-        for k in range(100):
-            sample_inds = np.random.randint(0,surv.shape[0],(surv.shape[0]))
-            km_out = kaplan_meier(events=disc_y_e[sample_inds], durations=disc_y_t[sample_inds]).to_numpy().tolist()
-            mdl_out = np.mean(surv[sample_inds],axis=0)
-            
-            # sometimes don't get a last index on the KM - extend last value out
-            while (len(km_out) < surv.shape[1]):
-                km_out.append(km_out[-1])
-                
-            km_outs.append(km_out)
-            mdl_outs.append(mdl_out)
-            
-        mdl_outs = np.vstack(mdl_outs)
-        km_outs = np.vstack(km_outs)
+        # %% 16. evlauations
         
-        mdl_int_low = [] # 
-        mdl_int_high = []
-        mdl_median = []
-        km_int_low = []
-        km_int_high = []
-        km_median = []
-        for k in range(km_outs.shape[1]):
-            km_median.append(np.median(km_outs[:,k]))
-            km_int_high.append(np.percentile(km_outs[:,k],97.5))
-            km_int_low.append(np.percentile(km_outs[:,k],2.5))
-            mdl_median.append(np.median(mdl_outs[:,k]))
-            mdl_int_high.append(np.percentile(mdl_outs[:,k],97.5))
-            mdl_int_low.append(np.percentile(mdl_outs[:,k],2.5))
-            
-        fig1, ax = plt.subplots()
-        plt.plot(sample_time_points, km_median)
-        ax.fill_between(sample_time_points, km_int_low, km_int_high, color='b', alpha=.1)
-        plt.plot(sample_time_points,mdl_median, color='r')
-        ax.fill_between(sample_time_points, mdl_int_low, mdl_int_high, color='r', alpha=.1)
-        plt.legend(('KM','KM 2.5-97.5%','Model','Model 2.5-97.5%'))
-        plt.xlabel('Years')
-        plt.ylabel('Survival')
-        plot_file_path = os.path.join(temp_path, 'KM vs Model 100xBS Survival Curve.pdf')
-        fig1.savefig(plot_file_path)
-        
-        
-        outputs_hdf5_path = os.path.join(temp_path, 'Surv_Outputs.hdf5')
-        Save_to_hdf5(outputs_hdf5_path, sample_time_points, 'sample_time_points')
-        Save_to_hdf5(outputs_hdf5_path, mdl_median, 'SF_mdl_median')
-        Save_to_hdf5(outputs_hdf5_path, mdl_int_low, 'SF_int_low')
-        Save_to_hdf5(outputs_hdf5_path, mdl_int_high, 'SF_mdl_int_high')
-        Save_to_hdf5(outputs_hdf5_path, km_median, 'SF_km_median')
-        Save_to_hdf5(outputs_hdf5_path, km_int_low, 'SF_km_int_low')
-        Save_to_hdf5(outputs_hdf5_path, km_int_high, 'SF_km_int_high')
+        # Save out KM. Add bootstrapping (20x). Saves KM values out separately in case you want to recreate that.
+        Gen_KM_Bootstraps(surv, disc_y_e, disc_y_t, sample_time_points, args)
 
-
-        print('Finished KM bootstraps. Starting all-ECG briercordance Total time elapsed: ' + str(time.time()-start_time) )
-        # %% 16. Concordance and Brier Score across all ECGs
-
-        # discretize test_outputs time
-        concordance_store_all_ecg, ipcw_brier_store_all_ecg, chance_at_censored_point_all_ecg  = get_surv_briercordance(disc_y_t, disc_y_e_bool, surv_df, [1,2,5,10,999], sample_time_points)
+        # Concordance and Brier Score 
+        time_points = [1,2,5,10,999]
+        # across all ECG
+        Gen_Concordance_Brier_No_Bootstrap(surv_df, disc_y_t, disc_y_e, time_points, sample_time_points, args)
+        # bootstrap: 1 ECG per patient x 20
+        Gen_Concordance_Brier_PID_Bootstrap(Data, args, disc_y_t, disc_y_e, surv_df, sample_time_points, time_points)
         
-        Save_to_hdf5(outputs_hdf5_path, concordance_store_all_ecg, 'concordance_store_all_ecg')
-        Save_to_hdf5(outputs_hdf5_path, ipcw_brier_store_all_ecg, 'ipcw_brier_store_all_ecg')
-        Save_to_hdf5(outputs_hdf5_path, chance_at_censored_point_all_ecg, 'chance_at_censored_point_all_ecg')
+        # AUROC and AUPRC
+        time_points = [1,2,5,10] # 999 doesn't work for AUROC
+        Gen_AUROC_AUPRC(disc_y_t, disc_y_e, surv, time_points, sample_time_points, args)
+        print_classifier_ROC(test_correct_outputs, test_outputs)
         
-        fig1, ax = plt.subplots()
-        plt.plot([0,upper_time_lim],[.5,.5], '--') # concordance if guessing
-        plt.plot(sample_time_points, ipcw_brier_store_all_ecg)
-        plt.plot(sample_time_points, concordance_store_all_ecg)
-        plt.ylim([0,1])
-        plt.legend(['Concordance Chance','Brier = MSE','Concordance'])
-        plt.xlabel('follow-up time (years)')
-        plt.ylabel('Measure for time bin')
-        plot_file_path = os.path.join(temp_path, 'briercordance, briercordance.pdf')
-        fig1.savefig(plot_file_path)
-
+        # histogram
+        save_histogram(sample_time_points, disc_y_t, surv, args)
         
-        # %% 17. Concordance and Brier, bootstrapping 1 ECG per patient
-        # (later, they will be combined for all the random seeds into a single mean / stdev / 95% CI)
-        print('Got to bootstrap concordances. Total time elapsed: ' + str(time.time()-start_time) )
-        # 1. find relevant rows per subjetc ID
-        if (args['Eval_Dataloader'] == 'Validation'):
-            Subj_IDs = Data['y_valid'][:,-3]    # PID lives in -3
-        elif (args['Eval_Dataloader'] == 'Train'):
-            Subj_IDs = Data['y_train'][:,-3]    
-        else:
-            Subj_IDs = Data['y_test'][:,-3]  
-            
-        Subj_IDs_Unique = np.unique(Subj_IDs)
-        Subj_ID_to_Rows_Dict = {} # map ID to rows
-        for ind,val in enumerate(Subj_IDs):
-            if val in Subj_ID_to_Rows_Dict.keys():
-                Subj_ID_to_Rows_Dict[val].append(ind)
-            else:
-                Subj_ID_to_Rows_Dict[val] = [ind]
-            
-        bootstrap_briers = [] # list of lists
-        bootstrap_concordances = [] # list of lists
-        
-        bootstraps = 20 
-        Inds = [Subj_ID_to_Rows_Dict[k][0] for k in Subj_IDs_Unique]
-        
-        for b in range (bootstraps):
-            # 3. Sample one revelant Surv row per each subject.
-            for i,s in enumerate(Subj_IDs_Unique):
-                tmp = Subj_ID_to_Rows_Dict[s]
-                if (len(tmp) != 1):
-                    Inds[i] = tmp[np.random.randint(0,len(tmp))]
-            
-            concordance_score, ipcw_brier_score, chance_at_censored_point  = get_surv_briercordance(disc_y_t[Inds], disc_y_e[Inds], surv_df.iloc[:,Inds], [1,2,5,10,999], sample_time_points)
-            
-            bootstrap_briers.append(ipcw_brier_score)
-            bootstrap_concordances.append(concordance_score)
-                
-        Save_to_hdf5(outputs_hdf5_path, bootstrap_briers, 'bootstrap_briers')
-        Save_to_hdf5(outputs_hdf5_path, bootstrap_concordances, 'bootstrap_concordances')
-        print('Finished bootstrap concordance. Heading to AUC Total time elapsed: ' + str(time.time()-start_time) )
-
-        # %%  18. Now add AUROC and AUPRC of the survival output
-        S_AUROC_store, S_AUPRC_store, Chance_At_Age = get_AUROC_AUPRC(disc_y_t, disc_y_e, surv, [1,2,5,10], sample_time_points)
-        
-        # how did the classifier perform at its classification task?
-        Classif_AUROC = roc_auc_score(test_correct_outputs,test_outputs)
-        Classif_AUPRC = average_precision_score(test_correct_outputs,test_outputs)
-        
-        print('Classif_AUROC ' + str(Classif_AUROC))
-        print('Classif_AUPRC ' + str(Classif_AUPRC))
-        
-        fig1, ax = plt.subplots()
-        plt.plot([0,upper_time_lim],[.5,.5], '--')
-        plt.plot(sample_time_points,Chance_At_Age,'--')
-        plt.plot(sample_time_points, S_AUROC_store)
-        plt.plot(sample_time_points, S_AUPRC_store)
-        plt.ylim([0,1])
-        plt.legend(['AUROC Chance' , 'Chance at time','AUROC','AUPRC'])
-        plt.xlabel('follow-up time (years)')
-        plt.ylabel('Measure for time bin')
-        plot_file_path = os.path.join(temp_path, 'AUROC, AUPRC.pdf')
-        fig1.savefig(plot_file_path)
-        
-        Save_to_hdf5(outputs_hdf5_path, S_AUROC_store, 'AUROC')
-        Save_to_hdf5(outputs_hdf5_path, S_AUPRC_store, 'AUPRC')
-        
-        # %% 19. Now save out a histogram as csv
-        
-        fig1, ax = plt.subplots(2)
-        quant, bin_loc = np.histogram(sample_time_points[disc_y_t],bins=surv.shape[1])
-        ax[1].bar(bin_loc[1:],quant,width= (max(sample_time_points)-min(sample_time_points))/len(sample_time_points))
-        ax[1].set(xlabel = 'Time to event or censor (years)' , ylabel = 'Sample Count' )
-        plot_file_path = os.path.join(temp_path, 'Time Dist Histogram.pdf')
-        fig1.savefig(plot_file_path)
-
-        hist_path = os.path.join(temp_path, 'Histogram.csv')
-        temp = np.transpose(np.vstack( (bin_loc[1:], quant, quant[0] + sum(quant) - np.cumsum(quant))))
-        headers = "bin end time, quantity in bin, quantity at risk "
-        np.savetxt(hist_path, temp, header=headers, delimiter = ',')
-        
-        print('Finished evaluation. Total time elapsed: ' + str(time.time()-start_time) )
+        print('Model_Runner: Finished evaluation. Total time elapsed: ' + str(time.time()-start_time) )
         
         
         # %% multimodal work
@@ -695,11 +375,6 @@ def Run_Model(args):
         # temp = np.array(save_out).transpose()
         # np.savetxt(characteristics_path, temp, header=headers, delimiter = ',')
         
-        
-        
-    # %% load?
-    # asdf.Load()
-    
     #%% Test?
 if __name__ == '__main__':
    main()

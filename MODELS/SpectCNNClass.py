@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-Created on Mon Jul  8 12:00:12 2024
+Follows https://www.researchgate.net/publication/334407179_ECG_Arrhythmia_Classification_Using_STFT-Based_Spectrogram_and_Convolutional_Neural_Network 
+per reviewer 3's suggestions
 
-@author: CH242985
 """
 import torch
 import os
 from tqdm import tqdm
 
+import torchaudio
 
 import torch
 import torch.nn as nn
@@ -31,24 +32,44 @@ from MODELS.Support_Functions import Normalize
 from MODELS.Support_Functions import Get_Loss_Params
 from MODELS.Support_Functions import Get_Loss
 
+class Spect_CNN(nn.Module):
+    # just wrapping the LSTM here to return the correct h/c outputs, not the outputs per ECG time point
+    # https://discuss.pytorch.org/t/cnn-lstm-for-video-classification/185303/7
+    
+    def __init__ (self):
+        super(Spect_CNN, self).__init__()
+        
+        self.model = nn.Sequential(
+            nn.Conv2d(12, 32, (4,4)),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=(2,2)),
+            
+            nn.Conv2d(32, 64, (2,2)),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=(2,2)),
+            
+            nn.Conv2d(64, 64, (2,2)),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=(2,2)),
+            
+            nn.Flatten(),
+            nn.Dropout(),
+            nn.Linear(in_features = 246016, out_features = 2)
+            )
+        
+        self.Spect = torchaudio.transforms.MelSpectrogram(sample_rate = 400, n_mels = 512, n_fft=1024, hop_length=8).to('cuda')
+        
+
+    def forward(self, input_ecg):
+        a = self.Spect( torch.transpose( input_ecg[:,0,:,:],2,1)) # NCHW 32 x 12 x 512 x 513
+        ret = self.model(a[:,:,:,:512]) # cut last freq to line up size
+        return ret # output is N x output_shape
 
 
-class FFClass(GenericModel):
+class SpectCNNClass(GenericModel):
     
     def Gen_New_Model(self):
-        
-        if (self.LSTM == False):
-            self.model = nn.Sequential(
-                nn.Flatten(),
-                nn.Dropout(),
-                nn.Linear(in_features = 4096*12, out_features = 2)
-                )
-        else:
-            self.model = nn.Sequential(
-                nn.Flatten(),
-                nn.Dropout(),
-                nn.Linear(in_features = 4096*12, out_features = self.LSTM_Feat_Size)
-                )
+        self.model = Spect_CNN()
     
     def __init__(self, args, Data):
         

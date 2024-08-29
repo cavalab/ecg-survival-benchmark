@@ -213,7 +213,7 @@ class GenericModel:
             self.Data['y_test']  = np.float64(self.Data['y_test']) #8/6/24
             self.test_dataset  = Custom_Dataset(self.Data['x_test']  , self.Data['y_test'][:,-1]) # modified event, e*, lives in -1
             self.test_dataloader = torch.utils.data.DataLoader (self.test_dataset,  batch_size = self.GPU_minibatch_limit, shuffle = False) #DO NOT SHUFFLE
-        print('GenericModel: Dataloader prep T = ', time.time() - a)
+        print('GenericModel: Data restructuring, normalization, and dataloader prep T = ', time.time() - a)
 
 
     def prep_normalization_and_reshape_data(self, args, Data):
@@ -226,7 +226,7 @@ class GenericModel:
             self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev = Get_Norm_Func_Params(args, Data['x_train'])
         else:
             print('Cant prep normalization')
-        print('GenericModel: Train Data reshape and normalization prep T = ', time.time() - a)
+        print('GenericModel: Train ECG reshape and normalization param calc T = ', time.time() - a)
 
     def Prep_LossFunction(self, args, Data):
         if 'y_train' in Data.keys():     

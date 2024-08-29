@@ -12,10 +12,9 @@ import numpy as np
 # for brier and concordance evaluations
 import pandas as pd # monkeypatch
 pd.Series.is_monotonic = pd.Series.is_monotonic_increasing
-from pycox.evaluation import EvalSurv
 
-from sklearn.metrics import roc_auc_score
-from sklearn.metrics import average_precision_score
+
+
 import os, h5py
 
 from torch.utils.data.sampler import BatchSampler
@@ -212,101 +211,7 @@ def Get_Loss(Model_Out, Correct_Out, Loss_Params): # Get a loss for a batch
 
     return 0
 
-# %% Survival metrics
-def get_surv_briercordance(disc_y_t, disc_y_e, surv_df, target_times, time_points):
-    # disc_y_t - (N,) int numpy array of discretized times when event occurs
-    # disc_y_e - (N,) int or bool numpy array of whether event occurs
-    # target_times - float list. Which years we care to sample (will pick nearest neighbor in time_points)
-    # time_points - (N,) numpy array of which surv rows correspond to which years
-    # 
-    # get IPCW brier score and concordance
-    # ... only at time_points (years) closest to target_times (years)
-    # ... this necessarily requires forced right-censoring at target_times < max (time_points)
-    
-    # we're requesting performance at times (yr), but we need the time points(index) corresponding to those times
-    right_censor_time_point_list = []
-    for k in target_times:
-        a = np.argmin( abs(time_points - k))
-        right_censor_time_point_list.append(a)
 
-    # prep plot-compatible output storage
-    ipcw_brier_store_all_ecg  = -1 * np.ones(time_points.shape)
-    concordance_store_all_ecg = -1 * np.ones(time_points.shape)
-    chance_at_censored_point  = -1 * np.ones(time_points.shape)
-
-    for time_point in right_censor_time_point_list: 
-        if time_point == 0: # scores are not defined at '0' 
-            continue
-        
-        # otherwise, right-censor and measure 
-        disc_y_t_temp = np.copy(disc_y_t)
-        disc_y_e_temp = np.copy(disc_y_e)
-        
-        temp_censor_inds = np.where(disc_y_t >time_point)[0]
-        disc_y_t_temp[temp_censor_inds] = time_point
-        disc_y_e_temp[temp_censor_inds] = 0
-        
-        evsurv = EvalSurv(surv_df, disc_y_t_temp, disc_y_e_temp, censor_surv='km') 
-        
-        #sometimes nothing happens at earlier time points. 
-        if (max(disc_y_t_temp) == min(disc_y_t_temp)):
-            temp_c = -1
-        else:
-            temp_c = evsurv.concordance_td('antolini')
-
-        temp_b = evsurv.integrated_brier_score(np.arange(min(time_point,time_points.shape[0]))) # very unstable beyond the censor point, so stop there
-        temp_chance = sum(disc_y_e_temp)/len(disc_y_e_temp) # a guess of the "chance" rate (assumes all censored patients survive)
-        
-        concordance_store_all_ecg[time_point] = temp_c
-        ipcw_brier_store_all_ecg[time_point]  = temp_b
-        chance_at_censored_point[time_point]  = temp_chance
-        
-    return (concordance_store_all_ecg, ipcw_brier_store_all_ecg, chance_at_censored_point)
-
-def get_AUROC_AUPRC(disc_y_t, disc_y_e, surv, target_times, time_points):
-    # Measure AUROC and AUPRC at several right-censored locations
-    # disc_y_t - (N,) int numpy array of discretized times when event occurs
-    # disc_y_e - (N,) int or bool numpy array of whether event occurs
-    # target_times - float list. Which years we care to sample (will pick nearest neighbor in time_points)
-    # time_points - (N,) numpy array of which surv rows correspond to which years
-
-    right_censor_time_point_list = []
-    for k in target_times:
-        a = np.argmin( abs(time_points - k))
-        right_censor_time_point_list.append(a)
-    
-    AUROC_store = []
-    AUPRC_store = []
-    Chance_At_Age = []
-    for k in range(surv.shape[1]):
-        
-        if k not in right_censor_time_point_list:
-            AUROC_store.append(-1)
-            AUPRC_store.append(-1)
-            Chance_At_Age.append(-1)
-            continue
-
-        correct = ((disc_y_t<=k) * (disc_y_e==1)).astype(int)
-        estimate = 1-surv[:,k]
-        
-        try:
-            AUROC = roc_auc_score(correct,estimate)
-        except:
-            AUROC = -1 # sometimes the classifier is all 0 or all 1
-            
-        try:    
-            AUPRC = average_precision_score(correct,estimate)
-        except:
-            AUPRC = -1
-            
-        AUROC_store.append(AUROC)
-        AUPRC_store.append(AUPRC)
-        
-        Chance_At_Age.append(sum(correct)/len(correct))
-        
-    return AUROC_store, AUPRC_store, Chance_At_Age
-
-    
     
 # %% Utility: append variable to existing hdf5 file
 def Save_to_hdf5(path, var, var_name):
