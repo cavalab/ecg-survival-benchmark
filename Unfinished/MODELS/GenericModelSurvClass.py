@@ -89,16 +89,9 @@ class GenericModelSurvClass(GenericModel):
         self.gen_ecg_model()
             
         # 5. wrap our network with the fusion modules before building optimizer/scheduler
-        if ('direct' in args.keys()):
-            if (args['direct'] == 'True'):
-                self.prep_fusion(out_classes = 2, direct = True)
-            else:
-                self.prep_fusion(out_classes = 2, direct = False)
-        else:
-            self.args['direct'] = 'False'
-            self.prep_fusion(out_classes = 2, direct = False)
+        self.prep_fusion(out_classes = 2)
         
-            
+
         # 6. Optimizer and scheduler
         self.prep_optimizer_and_scheduler()
         
@@ -107,18 +100,17 @@ class GenericModelSurvClass(GenericModel):
     def gen_ecg_model(self):
         # figures out how to summon model, image adjustment functions
         
-        breakpoint()
         # 1 figure out output channel size
         if 'x_train' in self.Data.keys():
             n_in_channels = self.Data['x_train'].shape[-1]
         else:
             n_in_channels = 12
         
-        if (self.args['Model_Type'] == 'RibeiroClass'):
+        if (self.args['Model_Type'] == 'Ribeiro'):
             self.model = get_ribeiro_model(self.args, n_in_channels) # get the ECG interpreting model
             self.Adjust_Many_Images = get_ribeiro_process_multi_image() # pointer to function
             
-        if (self.args['Model_Type'] == 'InceptionTimeClass'):
+        if (self.args['Model_Type'] == 'InceptionTime'):
             self.model = get_InceptionTime_model(self.args, n_in_channels) # get the ECG interpreting model
             self.Adjust_Many_Images = get_InceptionTime_process_multi_image() # pointer to function
 

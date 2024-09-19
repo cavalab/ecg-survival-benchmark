@@ -84,7 +84,7 @@ class FusionModel(nn.Module):
     # Then we combine them with a fusion model
     # ... or we just decode the ECG with a linear layer
     
-    def __init__(self, ECG_Model, out_classes = 2, direct = False):
+    def __init__(self, ECG_Model, out_classes, fusion_layers, fusion_dim, cov_layers, cov_dim):
         # inputs:
         # ECG_Model: a CNN or something that processes ECG to features (encoder)
         # out_classes: number of output classes from the fusionmodel
@@ -92,51 +92,51 @@ class FusionModel(nn.Module):
         #     if indirect,adds 2 linear/relu chunks first 
         # note: providing covariates AND direct will crash this
         
+        # also get fusion_layers
+        # 
+        
         super(FusionModel, self).__init__()
+
         
-        self.direct = direct
-        
+        # ECG processing chunk
         self.ECG_Model = ECG_Model
-        if (direct):
-            self.fusion_lin = nn.LazyLinear(out_features = out_classes)
-        else:
-            self.fusion_lin =  nn.Sequential(
-                				nn.LazyLinear(out_features = 100),
-                                nn.ReLU(),
-                                nn.LazyLinear(out_features = 100),
-                                nn.ReLU(),
-                                nn.LazyLinear(out_features = out_classes),
-    				)
         
-        self.cov_lin =  nn.Sequential(
-            				nn.LazyLinear(out_features = 32),
-                            nn.ReLU(),
-                            nn.LazyLinear(out_features = 32),
-                            nn.ReLU(),
-                            nn.LazyLinear(out_features = out_classes),
-				)
+        # Covariate processing chunk
+        self.covariate_module_list = nn.ModuleList()
+        for k in range(cov_layers):
+            self.covariate_module_list.append(nn.LazyLinear(out_features=cov_dim))
+            self.covariate_module_list.append(nn.ReLU())
+        
+        # Fusion chunk and final linear chunk
+        self.fusion_module_list = nn.ModuleList()
+        for k in range(fusion_layers):
+            self.fusion_module_list.append(nn.LazyLinear(out_features=fusion_dim))
+            self.fusion_module_list.append(nn.ReLU())
+        self.fusion_module_list.append(nn.LazyLinear(out_features=out_classes))
+            
+        
+
+        
         
     def forward(self, x, z):
         # x - ECG
         # z - covariates - float32
         
-        a = self.ECG_Model(x)
+        # process ECG
+        a = self.ECG_Model(x) 
         
-        if (self.direct == True): # if short decoder
-            if (z.shape[1] !=0): # crash if also passing covariates
-                print('requesting direct ECG processing AND providing covariates')
-                print('this is not an expected use case. crashing.')
-                breakpoint()
-            else:
-                return self.fusion_lin(a) # otherwise run short decoder
+        # process covariates and append
+        if (len(self.covariate_module_list) > 0):
+            b = z
+            for covariate_layer in self.covariate_module_list:
+                b = covariate_layer(b)
+            a = torch.concatenate( (a,b),dim=1)
+        
+        # apply fusion layers (includes final linear layer)
+        for fusion_layer in self.fusion_module_list:
+            a = fusion_layer(a)
             
-        if (self.direct == False): # use the longer decoder
-            if (z.shape[1] !=0): # if covariates, process and concatenate
-                b = self.cov_lin(z)
-                c = torch.concatenate((a,b), dim=1)
-                return self.fusion_lin(c)
-            else: 
-                return self.fusion_lin(a)
+        return a
 
     
 # %%
@@ -270,8 +270,30 @@ class GenericModel:
 # %% Network pieces
     # %% Fusion pieces
     
-    def prep_fusion(self, out_classes = 2, direct = False):
-        self.model = FusionModel(self.model, out_classes = out_classes, direct = direct)
+    def prep_fusion(self, out_classes = 2):
+        
+        # Process Fusion args
+        if ('fusion_layers' in self.args.keys()):
+            fusion_layers = int(self.args['fusion_layers'])
+        else:
+            fusion_layers = 0
+            
+        if ('cov_layers' in self.args.keys()):
+            cov_layers = int(self.args['cov_layers'])
+        else:
+            cov_layers = 0
+            
+        if ('fusion_dim' in self.args.keys()):
+            fusion_dim = int(self.args['fusion_dim'])
+        else:
+            fusion_dim = 128
+            
+        if ('cov_dim' in self.args.keys()):
+            cov_dim = int(self.args['cov_dim'])
+        else:
+            cov_dim = 32
+            
+        self.model = FusionModel(self.model, out_classes, fusion_layers, fusion_dim, cov_layers, cov_dim)
         self.model.to(self.device)
         
     def prep_classif_loss(self):
@@ -282,7 +304,7 @@ class GenericModel:
         else:
             self.args['Loss_Type'] = 'SSE'
             print ('By default, using SSE loss')
-            self.Loss_Params = Get_Loss_Params(args) 
+            self.Loss_Params = Get_Loss_Params(self.args) 
 
     def prep_optimizer_and_scheduler(self):
         

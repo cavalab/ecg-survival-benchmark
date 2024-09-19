@@ -1,0 +1,30 @@
+# from https://stackoverflow.com/questions/54678805/containerize-a-conda-environment-in-a-singularity-container
+# and https://stackoverflow.com/questions/63641962/singularity-container-never-has-python-in-it
+# and https://forums.developer.nvidia.com/t/unable-to-run-cuda-programs-in-singularity-containers-from-ngc/157438
+
+# wsl2 and https://sylabs.io/2022/03/wsl2-gpu/
+
+Bootstrap: docker
+From: nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
+
+%post
+    apt-get update 
+    apt-get install -y --no-install-recommends python3 python3-pip
+
+    pip3 install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cu118
+    pip3 install h5py tqdm pandas matplotlib     
+    pip3 install fire
+    pip3 install scikit-learn
+    pip3 install pycox
+    pip3 install scikit-survival
+    pip3 install parameterfree
+    pip3 install wfdb
+
+    rm -rf /var/lib/apt/lists/*
+    apt-get clean
+
+
+%environment
+    export DISPLAY="$(grep nameserver /etc/resolv.conf | sed 's/nameserver //'):0"
+    LIBGL_ALWAYS_INDIRECT=1
+    export LIBGL_ALWAYS_INDIRECT  

@@ -1,73 +1,12 @@
-# args['horizon']           - float; {coreq} also requires args['y_col_train_time'] and args['y_col_train_event'], or args['y_col_test_time'] and args['y_col_test_event']. ignores args['y_col_train'] and args['y_col_test']
-# args['y_col_train_time']  - int;   {coreq 'horizon'} 
-# args['y_col_train_event'] - int;   {coreq^}
-# args['y_col_test_time']   - int;   {coreq 'horizon'}
-# args['y_col_test_event']  - int;   {coreq^}
-# args['y_col_train']       - int; which column of Y is train data (ignored with horizon)
-# args['y_col_test']        - int; which column of Y is test data  (ignored with horizon)
+# 1. Pull data, split, continue as usual until train
 
-# New asusmption 5/1/24: column 0 of Data[] is patient ID
-
-"""
-MODEL_RUNNER
-
-Model_Runner:
-    - Model_Runner Interprets passed arguments
-        - Either from Command Line (main)
-        - Or from another script (Run_Model_via_String_Arr)
-            ex: args = '--Train_Folder '+folder+' --Model_Name Resnet18Class_asfd1 --Train True --Test_Folder '+folder+' --batch_size 128 --epoch_end 10 --validate_every 10'
-
-    - Quick note on Models:
-        - Model Type is set by the first half (up to an underscore) of their name: --Model_Name Resnet18Class_[asfd1]
-        - Trained models live in Trained_Models/[their training data folder], as passed in: --Train_Folder [folder]
-        - Model_Runner MUST get the Train_Folder and Model_Name arguments to know which model to build or use
-        
-    - Model_Runner:
-        - Sets Model Name 
-        - Determines if training happens (requires --Train True AND --Train_Folder [folder])
-        - Sets a random seed if that was not passed
-        - If training, Loads training data. 
-            - Data is currently (12/4/23) assumed to be in:
-                - In os.path.join(os.getcwd(),'HDF5_DATA',args['Train_Folder'],'TRAIN_DATA','Train_Data.hdf5')
-                - With numpy parameters 'x' and 'y'
-        - If evaluating: (requires --Test_Folder [folder])
-            - Attempts to load from os.path.join(os.getcwd(),'HDF5_DATA',args['Test_Folder'],'TEST_DATA','Test_Data.hdf5')
-            - On failure:
-                - Checks for a passed TE_RATIO argument. By default, TR_RATIO = 80, VA_RATIO = 20.
-                    - generates a test set from a training/validation/test split of:
-                    - os.path.join(os.getcwd(),args['Test_Folder'],'TRAIN_DATA','Train_Data.hdf5')
-        - If a training set is present:
-            - Data is split randomly into Train/Test/Validate from TR_RATIO/TE_RATIO/VA_RATIO
-            - Splits prioritize allocations for Train/Test/Validate in that order (ceil, ceil, remainder) (If a class only has one sample, it is in training.)
-            - For classifiers, the split is performed per class
-            - Everything is stored in Data['x_train'], Data['x_valid'], Data['x_test'], and y-equivalents
-            
-        - Initalizes a model: model(args, Data)
-        - Runs model.load() if --Load [anything]
-        - Runs model.eval() if --Test_Folder [anything]
-        - Generates figures from eval, saves figure, eval params, and eval outputs
-        
-    - Other:
-        - Model training and evaluation are split intentionally
-        - Classifiers currently assume the lowest class number to be 0
-        - If you specify a non-default (0 or 1) column of train_y or test_y to use, that will add sub-folders to the path
-        
-
-main() parses command line inputs, then feeds a dict to run_model()
-Run_Model_via_String_Arr() parses arguments from an array of strings, then feeds a dict to run_model()
-
-DATA is assumed to be in N-H or N-H-W or N-C-H-W format. 
-For time series, this would be N-Length or N-Length-Chan or N-[Color]-Length-Chan
-Currently, all models reshape it into N-C-H-W
-
-[Not yet implemented] normalization is currently done per_color (N-_C_-H-W)
-"""
 
 # %% Imports; Support functions before main functions...
 
 # handle pycox folder requirement FIRST
 import os 
 os.environ['PYCOX_DATA_DIR'] = os.path.join(os.getcwd(),'Mandatory_PyCox_Dir') # next line requires this. it's a bad init call.
+
 
 
 from Model_Runner_Support import get_covariates
@@ -114,6 +53,13 @@ import argparse
 from sklearn.metrics import roc_auc_score
 from sklearn.metrics import average_precision_score
 
+from sklearn.preprocessing import MinMaxScaler
+from xgboost import XGBClassifier
+
+# scipy compatability...
+import scipy
+scipy.integrate.simps = scipy.integrate.simpson
+
 # %% 
 def main(*args):
     # Initialize parser
@@ -142,12 +88,12 @@ def Run_Model(args):
     
     # %% 1. CUDA check
     # CUDA
-    for i in range(torch.cuda.device_count()):
-       print(torch.cuda.get_device_properties(i).name)
+    # for i in range(torch.cuda.device_count()):
+    #    print(torch.cuda.get_device_properties(i).name)
        
-    if (torch.cuda.is_available() == False):
-        print('No CUDA. Exiting.')
-        exit()
+    # if (torch.cuda.is_available() == False):
+    #     print('No CUDA. Exiting.')
+    #     exit()
        
     # %% 2. Arg Processing
     # Grab model name. No point in proceeding without it.
@@ -186,6 +132,10 @@ def Run_Model(args):
     Split_Data(Data)             # splits 'train' data 80/20 into train/val by PID
     DebugSubset_Data(Data, args) # If args['debug'] == True, limits Data[...] to 1k samples each of tr/val/test.
     
+    # dump x
+    for key in ['train', 'valid', 'test']:
+        x_key = 'x_'+key
+        Data[x_key] = []
     
     # augment data with reshaped covariates
     for key in ['train', 'valid']:
@@ -203,14 +153,34 @@ def Run_Model(args):
     set_up_train_folders(args)
 
     # %% 10. Select model, (maybe) load an existing model. ask for training (runs eval after training reqs met)
-    print('Model_Runner: Got to init. Total time elapsed: ' ,'{:.2f}'.format(time.time()-start_time) )
     
-    asdf = GenericModelSurvClass.GenericModelSurvClass(args, Data)
     
-    print('Model_Runner:  Got to Train. Total time elapsed: ' ,'{:.2f}'.format(time.time()-start_time) )
-    if( ('Load' in args.keys())):
-        asdf.Load(args['Load'])
-    asdf.train()
+    # This is where things change
+    
+    # from https://xgboost.readthedocs.io/en/stable/get_started.html
+    asdf = XGBClassifier(n_estimators=100, learning_rate=0.1, objective='binary:logistic')
+    
+    
+    # do we need to normalize data first?
+    # from https://xgboosting.com/xgboost-min-max-scaling-numerical-input-features/
+    
+    scaler = MinMaxScaler(feature_range=(-1, 1))
+    Data['z_train'] = scaler.fit_transform(Data['z_train'])
+    Data['z_valid'] = scaler.transform(Data['z_valid'])
+    Data['z_test'] = scaler.transform(Data['z_test'])
+    
+    asdf.fit(Data['z_train'], Data['y_train'][:,-1])
+    
+    
+    
+    # print('Model_Runner: Got to init. Total time elapsed: ' ,'{:.2f}'.format(time.time()-start_time) )
+    
+    # asdf = GenericModelSurvClass.GenericModelSurvClass(args, Data)
+    
+    # print('Model_Runner:  Got to Train. Total time elapsed: ' ,'{:.2f}'.format(time.time()-start_time) )
+    # if( ('Load' in args.keys())):
+    #     asdf.Load(args['Load'])
+    # asdf.train()
         
 
     if ('Test_Folder' in args.keys()):
@@ -223,17 +193,33 @@ def Run_Model(args):
         # get model outputs for test, validation sets (unshuffled)
         if ('Eval_Dataloader' not in args.keys()): # This lets you evaluate the model on its validation set instead of test set
             args['Eval_Dataloader'] = 'Test'
-        test_outputs, test_Loss, test_correct_outputs = asdf.Test(Which_Dataloader = args['Eval_Dataloader'])
-        val_outputs, val_Loss, val_correct_outputs    = asdf.Test(Which_Dataloader = 'Validation')
-        # plt.plot(val_correct_outputs - Data['y_valid'][:,-1]) # to check shuffle
-        
+            
+        if args['Eval_Dataloader'] == 'Test':
+            test_outputs =  asdf.predict_proba(Data['z_test'])[:,1]
+            test_correct_outputs = Data['y_test'][:,-1] # E*, horizoned event, is at -1
+        if args['Eval_Dataloader'] == 'Train':
+            test_outputs =  asdf.predict_proba(Data['z_train'])[:,1]
+            test_correct_outputs = Data['y_train'][:,-1] # E*, horizoned event, is at -1
+        if args['Eval_Dataloader'] == 'Valid':
+            test_outputs =  asdf.predict_proba(Data['z_valid'])[:,1]
+            test_correct_outputs = Data['y_valid'][:,-1] # E*, horizoned event, is at -1
+            
+        # get validation outputs anyway for Cox model fit
+        val_outputs =  asdf.predict_proba(Data['z_valid'])[:,1]
+        val_correct_outputs = Data['y_valid'][:,-1] # E*, horizoned event, is at -1
+            
+
         # adjust output formats
         val_outputs  = np.squeeze(val_outputs)
         test_outputs = np.squeeze(test_outputs)
         
-        # softmax the outputs
-        val_outputs = np.array([softmax(k)[1] for k in val_outputs])
-        test_outputs = np.array([softmax(k)[1] for k in test_outputs])
+        # softmax the outputs (no need in XGB)
+        # predict_proba is already 0-1, so don't need to softmax
+        # val_outputs = np.array([softmax(k)[1] for k in val_outputs])
+        # test_outputs = np.array([softmax(k)[1] for k in test_outputs])
+        
+        
+        # --- From here, everything should go as before
         
         # Set up Folders
         set_up_test_folders(args)
@@ -320,59 +306,6 @@ def Run_Model(args):
         
         print('Model_Runner: Finished evaluation. Total time elapsed: ' + str(time.time()-start_time) )
         
-        
-        # %% multimodal work
-        # %% 20. Save out some more things maybe
-        
-        if ('Multimodal' in args.keys()):
-            multim_path = os.path.join(args['Model_Eval_Path'], 'Multimodal_Out.csv')
-            
-            # PID, TTE*, E* @ column inds [-3,-2,-1], respectively
-            temp = np.vstack( (Data['y_test'][:,-3],test_outputs,test_correct_outputs,Data['y_test'][:,-2], Data['y_test'][:,-1] )  )
-            temp = np.transpose(temp)
-            headers = 'PID, test_outputs, test_correct_output, TTE, E'
-            np.savetxt(multim_path, temp, header=headers, delimiter = ',')
-            
-            auroc_2, auprc_2, Chance_At_Age = Gen_AUROC_AUPRC(disc_y_t, disc_y_e, surv, [30/365], sample_time_points, args)
-        
-        
-        # # PID = Data_Y_Backup['y_test'][:,0]
-        # # test_outputs # softmax
-        # # test_correct_outputs # label passed
-        # # TTE = Data_Y_Backup['y_test'][:,3]
-        # # TTE = Data_Y_Backup['y_test'][:,4]
-        
-        # # %%21. Save out some more details
-        
-        # # 1. What is distribution of ECG count per PID in last T time?
-        # x = 0.05*np.arange(21)
-        # save_out = [x]
-        
-        # for time_lim in [1/52,1/12,1,999]:
-        #     subset = Data_Y_Backup['y_train'][np.where(Data_Y_Backup['y_train'][:,3] <= time_lim)[0],:]
-        #     unique_PID = np.unique(subset[:,0])
-        #     counts = [np.where(subset[:,0] == k)[0].shape[0] for k in unique_PID]
-        #     event = [Data_Y_Backup['y_train'][np.where(subset == k)[0][0],4] for k in unique_PID  ]
-        #     event = np.array(event).astype(int)
-        #     counts = np.array(counts).astype(int)
-            
-        #     y1 = np.quantile(counts[np.where(event==1)],x)
-        #     y2 = np.quantile(counts[np.where(event==0)],x)
-        #     save_out.append(y1)
-        #     save_out.append(y2)
-            
-        #     plt.figure()
-        #     plt.scatter(x*100,y2)
-        #     plt.scatter(x*100,y1)
-        #     plt.legend(['event=0 med '+str(np.median(y2))+' u '+'{0:.2f}'.format(np.mean(y2)),'event=1 med '+str(np.median(y1)) + ' u '+'{0:.2f}'.format(np.mean(y1))])
-        #     plt.xlabel('percentile')
-        #     plt.ylabel('count')
-        #     plt.title('count per PID | TTE < '+str(time_lim))
-            
-        # characteristics_path = os.path.join(temp_path, 'Train_Characteristics.csv')
-        # headers = 'percentile, 1-wk event 1, 1-wk event 0, 1-mo event 1, 1-mo event 0,1-yr event 1, 1-yr event 0, all-t event 1, all-t event 0'
-        # temp = np.array(save_out).transpose()
-        # np.savetxt(characteristics_path, temp, header=headers, delimiter = ',')
         
     #%% Test?
 if __name__ == '__main__':

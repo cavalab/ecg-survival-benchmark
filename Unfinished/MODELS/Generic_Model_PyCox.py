@@ -174,6 +174,8 @@ class Dataset_FuncList(torch.utils.data.Dataset):
         return self.data.shape[0]
 
 def collate_fn(batch):
+    # batch is a list of tuples of tensors
+    # this takes that list, stacks the tensors, and returns a tuple of stacked tensors
     # ultimately we have to match ... input, target = dataloader()
     # ^ lumping x,z into a tuple in the dataset works
     return tt.tuplefy(batch).stack() # demands list of tuples of torch tensors
@@ -201,14 +203,7 @@ class Generic_Model_PyCox(GenericModel):
         self.gen_ecg_model()
         
         # 3. wrap our network with the fusion modules before building optimizer/scheduler
-        if ('direct' in args.keys()):
-            if (args['direct'] == 'True'):
-                self.prep_fusion(out_classes = self.Num_Classes, direct = True)
-            else:
-                self.prep_fusion(out_classes = self.Num_Classes, direct = False)
-        else:
-            self.args['direct'] = 'False'
-            self.prep_fusion(out_classes = self.Num_Classes, direct = False)
+        self.prep_fusion(out_classes = self.Num_Classes)
         
         # 4. Wrap with PyCox model and init optimizer and scheduler
         self.pycox_mdl = self.Get_PyCox_Model() # sets pycox_mdl, optimizer, scheduler
@@ -227,12 +222,12 @@ class Generic_Model_PyCox(GenericModel):
         else:
             n_in_channels = 12
         
-        if (self.args['Model_Type'] == 'RibeiroReg'):
+        if (self.args['Model_Type'] == 'Ribeiro'):
             self.model = get_ribeiro_model(self.args, n_in_channels) # get the ECG interpreting model
             self.Adjust_Many_Images = get_ribeiro_process_multi_image() # pointer to function
             self.Adjust_One_Image = get_ribeiro_process_single_image() # pointer to function
             
-        if (self.args['Model_Type'] == 'InceptionTimeReg'):
+        if (self.args['Model_Type'] == 'InceptionTime'):
             self.model = get_InceptionTime_model(self.args, n_in_channels) # get the ECG interpreting model
             self.Adjust_Many_Images = get_InceptionTime_process_multi_image() # pointer to function
             self.Adjust_One_Image = get_InceptionTime_process_single_image() # pointer to function
@@ -455,8 +450,9 @@ class Generic_Model_PyCox(GenericModel):
             # a = self.Adjust_Many_Images(self.Data['x_train'][:,0,:,:])
             # b = torch.tensor(self.Data['z_train']).to(torch.float32)
             # self.pycox_mdl.compute_baseline_hazards(input= (a,b), target=[self.Data['y_train'][:,-2],self.Data['y_train'][:,-1]],batch_size = self.GPU_minibatch_limit)
-            self.pycox_mdl.compute_baseline_hazards(input= (self.Adjust_Many_Images(self.Data['x_train']),torch.tensor(self.Data['z_train']).to(torch.float32)), target=[self.Data['y_train'][:,-2],self.Data['y_train'][:,-1]],batch_size = self.GPU_minibatch_limit)
             
+            self.pycox_mdl.compute_baseline_hazards(input= (self.Adjust_Many_Images(self.Data['x_train']),torch.tensor(self.Data['z_train']).to(torch.float32)), target=[self.Data['y_train'][:,-2],self.Data['y_train'][:,-1]],batch_size = self.GPU_minibatch_limit)
+            # note: because we use validation performance to pick the model, we can't build the baselines on validation while that is going on (that's like fitting on the test set)
            
         surv    = self.pycox_mdl.predict_surv(my_dataloader)
         surv_df = self.pycox_mdl.predict_surv_df(my_dataloader) # contains surv, also stores 'index' which is the time in years rather than discretized points

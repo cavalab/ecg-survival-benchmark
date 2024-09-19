@@ -210,23 +210,24 @@ def Split_Data(Data):
 # %% Debug Data subset - pick 1k elements of train/val/test
 def DebugSubset_Data(Data, args):
     
-    if args['debug'] == 'True':
-        debug = True
-        sub_len = 1000
-        if (debug):
-            print("Model_Runner: WARNING - DEBUG speedup! only using "+str(sub_len)+' elems of tr/val/test!')
-            
-            tr_inds = np.random.randint(0, Data['x_train'].shape[0], (sub_len))
-            va_inds = np.random.randint(0, Data['x_valid'].shape[0], (sub_len))
-            te_inds = np.random.randint(0, Data['x_test'].shape[0], (sub_len))
-            
-            Data['x_train'] = Data['x_train'][tr_inds,:]
-            Data['x_valid'] = Data['x_valid'][va_inds,:]
-            Data['x_test'] = Data['x_test'][te_inds,:]
-            
-            Data['y_train'] = Data['y_train'][tr_inds]
-            Data['y_valid'] = Data['y_valid'][va_inds]
-            Data['y_test'] = Data['y_test'][te_inds]
+    if('debug' in args.keys()):
+        if args['debug'] == 'True':
+            debug = True
+            sub_len = 1000
+            if (debug):
+                print("Model_Runner: WARNING - DEBUG speedup! only using "+str(sub_len)+' elems of tr/val/test!')
+                
+                tr_inds = np.random.randint(0, Data['x_train'].shape[0], (sub_len))
+                va_inds = np.random.randint(0, Data['x_valid'].shape[0], (sub_len))
+                te_inds = np.random.randint(0, Data['x_test'].shape[0], (sub_len))
+                
+                Data['x_train'] = Data['x_train'][tr_inds,:]
+                Data['x_valid'] = Data['x_valid'][va_inds,:]
+                Data['x_test'] = Data['x_test'][te_inds,:]
+                
+                Data['y_train'] = Data['y_train'][tr_inds]
+                Data['y_valid'] = Data['y_valid'][va_inds]
+                Data['y_test'] = Data['y_test'][te_inds]
             
 # %% Folders            
 

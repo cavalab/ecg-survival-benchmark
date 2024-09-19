@@ -197,7 +197,7 @@ def Run_Model(args):
     set_up_train_folders(args)
     
     # %% 6. Select model, (maybe) load an existing model. ask for training (runs eval after training reqs met)
-    print('Model_Runner:  Got to model init. Total time elapsed: ' + str(time.time()-start_time) )
+    print('Model_Runner:  Got to model init. Total time elapsed: ' ,'{:.2f}'.format(time.time()-start_time) )
     asdf = Generic_Model_PyCox.Generic_Model_PyCox(args, Data)
     
     # if (Model_Type == 'InceptionTimeReg'):
@@ -211,7 +211,7 @@ def Run_Model(args):
     # if (Model_Type == 'SpectCNNReg'):
     #     asdf = SpectCNNReg_PyCox.SpectCNNReg_PyCox(args, Data)
       
-    print('Model_Runner:  Got to Train. Total time elapsed: ' + str(time.time()-start_time) )
+    print('Model_Runner:  Got to Train. Total time elapsed: ' ,'{:.2f}'.format(time.time()-start_time) )
     if( ('Load' in args.keys())):
         asdf.Load(args['Load'])
     asdf.train()
@@ -224,7 +224,7 @@ def Run_Model(args):
     
     if ('Test_Folder' in args.keys()):
         
-        print('Model_Runner:  got to model eval. Total Time elapsed: ' + str(time.time()-start_time))
+        print('Model_Runner:  got to model eval. Total Time elapsed: ' ,'{:.2f}'.format(time.time()-start_time))
         
         if ('num_durations' not in args.keys()):
             args['num_durations'] = '100'
@@ -279,7 +279,7 @@ def Run_Model(args):
         # histogram
         save_histogram(sample_time_points, disc_y_t, surv, args)
         
-        print('Model_Runner: Finished evaluation. Total time elapsed: ' + str(time.time()-start_time) )
+        print('Model_Runner: Finished evaluation. Total time elapsed: ' ,'{:.2f}'.format(time.time()-start_time) )
         
         
     #%% Test?
