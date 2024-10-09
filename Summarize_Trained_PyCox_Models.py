@@ -4,7 +4,6 @@ The goal is to summarize all the 'eval' outputs in 'trained files'
 
 """
 
-print('Model Summary only works for PyCox models')
 # import collections
 # collections.Callable = collections.abc.Callable
 
@@ -44,16 +43,19 @@ for Train_Source in os.listdir(Trained_Models_Path):
         model_measure_dict = {}
         
         # 0. Pull train args or continue
-        arg_path = os.path.join(Model_Path, 'Train_Args.txt')
-        if (os.path.isfile(arg_path) == False):
-            continue
+        if (Model_Name.startswith('XGB') == True):
+            model_param_dict['Model_Architecture'] = 'XGB'
         else:
-            with open(arg_path) as f:
-                tmp = json.load(f)
-                # store the train args
-                for k in tmp.keys():
-                    model_param_dict[k] = tmp[k]   
-                model_param_dict['Model_Architecture'] = model_param_dict['Model_Name'].split('_')[0]
+            arg_path = os.path.join(Model_Path, 'Train_Args.txt')
+            if (os.path.isfile(arg_path) == False):
+                continue
+            else:
+                with open(arg_path) as f:
+                    tmp = json.load(f)
+                    # store the train args
+                    for k in tmp.keys():
+                        model_param_dict[k] = tmp[k]   
+                    model_param_dict['Model_Architecture'] = model_param_dict['Model_Name'].split('_')[0]
         
         # 1. Grab Training_Progress CSV -> Find Epoch when validation stopped improving
         Train_Progress_CSV_Path = os.path.join(Model_Path, 'Training_Progress.csv')
@@ -114,12 +116,14 @@ for Train_Source in os.listdir(Trained_Models_Path):
         
             # prep measures dictionary
             model_measure_dict = {}
-            Measures_Path = os.path.join(Test_Path, 'Surv_Outputs.hdf5')
+            Measures_Path = os.path.join(Test_Path, 'Stored_Model_Output.hdf5')
             with h5py.File(Measures_Path, "r") as f:
+                print(Test_Path)
                 # keys = [key for key in f.keys()]
                 # for i,k in enumerate(keys):
                 #     print(i,k,f[k][()].shape)
-                    
+                
+                
                 AUROC = f['AUROC'][()]
                 AUPRC = f['AUPRC'][()]
                 BS_Brier = f['bootstrap_briers'][()].transpose() # bootstrapped
@@ -216,26 +220,32 @@ def Get_Data_RS(Model_Measures_List, model_inds, query_list):
     # output: m x q array of measure values. m - model, q - query.
     tmp_data_outer = []
     for b in model_inds:
-        tmp = Model_Measures_List[b]
+        tmp = Model_Measures_List[b] # model_measures_list is a list of dicts, each mapping queries to values
         tmp_data_inner = []    
         for q in query_list:
             tmp_data_inner.append(tmp[q])
         tmp_data_outer.append(tmp_data_inner)
+    tmp_data_outer = [k for k in tmp_data_outer if 'No Entry' not in k] # sometimes a model fails and has no measures -> trash
     tmp_data = np.array(tmp_data_outer)
+    
     return tmp_data
 
 def Get_med_25_75_percentile_per_col(Data):
     # input: m x n array
     # output: string. median_col_0, (25-75), median_col_1, (25-75), etc.
     out_list = []
-    for col in range(tmp_data.shape[1]):
-        tmp_col = tmp_data[:,col]
-        med = np.median(tmp_col)
-        p25 = np.percentile(tmp_col,25)
-        p75 = np.percentile(tmp_col,75)
-        out_list.append(np.round(med,decimals=2))
-        app_str = "({:.2f}".format(p25) + ", {:.2f})".format(p75)
-        out_list.append(app_str)
+    try:
+        for col in range(tmp_data.shape[1]):
+            tmp_col = tmp_data[:,col]
+            med = np.median(tmp_col)
+            p25 = np.percentile(tmp_col,25)
+            p75 = np.percentile(tmp_col,75)
+            out_list.append(np.round(med,decimals=2))
+            app_str = "({:.2f}".format(p25) + ", {:.2f})".format(p75)
+            out_list.append(app_str)
+    except:
+        out_list = [' ',' ']
+        pass
     return out_list
 
 def Get_Data_BS(Model_Measures_List, model_inds, query_list):
@@ -255,6 +265,20 @@ def Get_Data_BS(Model_Measures_List, model_inds, query_list):
         tmp_data_outer.append(tmp_data_inner)
     tmp_data = np.array(tmp_data_outer)
     tmp_data = np.transpose(tmp_data)
+    
+    # now 100 x 5. parse those 100, if 'no entry' delete, and convert all remaining to float
+    # tmp_data_outer = [k for k in tmp_data_outer if 'No Entry' not in k]
+
+    if (tmp_data.dtype != np.float64):
+        ind_to_keep = []
+        for i,k in enumerate(tmp_data):
+            if ('No Entry' not in k):
+                ind_to_keep.append(i)
+        tmp_data = tmp_data[ind_to_keep,:] 
+        tmp_data = tmp_data.astype(np.float64)
+
+            
+
     return tmp_data
 
 # %% Now, make some .csv tables where (train_set == test_set)
@@ -307,19 +331,28 @@ for T in [1,2,5,10,99]:
     BrierBS_queries.append(tmp)
 BrierBS_out_rows = []
 
+
+# %% Clustering trained models
+# give me metrics as med +/- percentile for a set of models
+# where the set is one where the following parameters all match
+cluster_keys = ['Train_Folder', 'Test_Folder', 'horizon', 'pycox_mdl', 'Model_Architecture', 'val_covariate_col_list']
+
+
 # Then, cluster models and summarize metrics per cluster
 model_cluster_names = []     
 processed_model_inds = []  # track which models we've clustered
 for i,k in enumerate(Model_Args_List):  # parse the args k per model evalution
-    if (k['Train_Folder'] != k['Test_Folder']): # exclude model evaluations where Test and Train aren't from the same dataset
-        continue
+    # if (k['Train_Folder'] != k['Test_Folder']): # exclude model evaluations where Test and Train aren't from the same dataset
+    #     continue
     if i in processed_model_inds: # exclude models we've already clustered
         continue
     model_cluster_inds = [i]
     for j, m in enumerate(Model_Args_List): # 
         if i == j:                          # parse other model evaluations
             continue
-        for key in ['Train_Folder', 'Test_Folder', 'horizon', 'pycox_mdl', 'Model_Architecture']:
+        
+        # breakpoint()
+        for key in cluster_keys: # cluster by
             model_matches = True
             if m[key] != k[key]: # exclude model evaluations that don't match 'k' on train_folder, test_folder, horizon, pycox_model, and model_name [model type]
                 model_matches = False
@@ -331,19 +364,41 @@ for i,k in enumerate(Model_Args_List):  # parse the args k per model evalution
         processed_model_inds.append(m) # ensure we don't repeat this clustering later
         
     # figure out how to name this cluster
-    tr_d = k['Train_Folder']
-    te_d = k['Test_Folder']
-    a = k['Model_Architecture']
+    train_folder = k['Train_Folder']
+    test_folder = k['Test_Folder']
+    architecture = k['Model_Architecture']
+    survmodel = ''
     if k['horizon'] == 'No Entry':
         if (k['pycox_mdl'] == 'CoxPH'):
-            m = 'DeepSurv'
+            survmodel = 'DeepSurv'
         else:
-            m = k['pycox_mdl']
+            survmodel = k['pycox_mdl']
     else:
-        m = 'Cla-'+str(int(float((k['horizon']))))
-            
+        survmodel = 'Cla-'+str(int(float((k['horizon']))))
+        
+    # covariates
+    tmp = len(k['val_covariate_col_list'].split(','))
+    if tmp==2: # demographics
+        cov = 'demographic'
+    elif tmp > 2:
+        cov = 'demographic + mm'
+    else:
+        cov = 'none'
+        
+    # number successful models
+    tmp_data = Get_Data_RS(Model_Measures_List, model_cluster_inds, AUROC_query) # returns a [models] x [queries] array
+
+    N_Run = len(model_cluster_inds)
+    # print(tmp_data)
+    # print(tmp_data.shape[0])
+    N_Success = tmp_data.shape[0]
+
+    if (N_Success ==0):
+        breakpoint()
+    
     # store the names
-    model_cluster_names.append([tr_d,te_d,a,m])
+    model_cluster_names.append([train_folder, test_folder, architecture, survmodel, cov, N_Run, N_Success])
+    model_name_header = ['train_folder', 'test_folder', 'architecture', 'survmodel', 'cov', 'N_Run', 'N_Success']
             
     # Now get the measures
     tmp_data = Get_Data_RS(Model_Measures_List, model_cluster_inds, AUROC_query) # returns a [models] x [queries] array
@@ -374,10 +429,10 @@ for i,k in enumerate(Model_Args_List):  # parse the args k per model evalution
 # Lastly, save out tables
 
 # Main Results tabel - train / task / architecture, AUROC 1-10, AUPRC 1-10, T99 concordance, T99 Brier
-header = ['d','m','a'] + AUROC_header + AUPRC_header +[ ConcordanceRS_header[-2]] + [ConcordanceRS_header[-1]] +[ BrierRS_header[-2]] + [BrierRS_header[-1]]
+header = model_name_header + AUROC_header + AUPRC_header +[ ConcordanceRS_header[-2]] + [ConcordanceRS_header[-1]] +[ BrierRS_header[-2]] + [BrierRS_header[-1]]
 out_list = [header]
 for row_num in range(len(model_cluster_names)):
-    tmp_list = [str(model_cluster_names[row_num][0])] + [str(model_cluster_names[row_num][2])] + [str(model_cluster_names[row_num][3])] + [str(k) for k in AUROC_out_rows[row_num]] + [str(k) for k in AUPRC_out_rows[row_num]] + [str(ConcordanceRS_out_rows[row_num][-2])] + [str(ConcordanceRS_out_rows[row_num][-1])] + [str(BrierRS_out_rows[row_num][-2])] + [str(BrierRS_out_rows[row_num][-1])]
+    tmp_list = [str(k) for k in model_cluster_names[row_num]] + [str(k) for k in AUROC_out_rows[row_num]] + [str(k) for k in AUPRC_out_rows[row_num]] + [str(ConcordanceRS_out_rows[row_num][-2])] + [str(ConcordanceRS_out_rows[row_num][-1])] + [str(BrierRS_out_rows[row_num][-2])] + [str(BrierRS_out_rows[row_num][-1])]
     out_list.append(tmp_list)
 Out_File_Path = os.path.join(tables_path, 'Trained_Model_Main_Result_Table.csv')    
 with open(Out_File_Path, 'w',newline='') as f:
@@ -385,10 +440,10 @@ with open(Out_File_Path, 'w',newline='') as f:
     wr.writerows(out_list)
     
 # BrierCordance RS Table - train / task / architecture, concordance RS 1-10,99, Brier RS 1-10, 99
-header = ['d','m','a'] + ConcordanceRS_header + BrierRS_header
+header = model_name_header + ConcordanceRS_header + BrierRS_header
 out_list = [header]
 for row_num in range(len(model_cluster_names)):
-    tmp_list = [str(model_cluster_names[row_num][0])] + [str(model_cluster_names[row_num][2])] + [str(model_cluster_names[row_num][3])] + [str(k) for k in ConcordanceRS_out_rows[row_num]] + [str(k) for k in BrierRS_out_rows[row_num]] 
+    tmp_list = [str(k) for k in model_cluster_names[row_num]] + [str(k) for k in ConcordanceRS_out_rows[row_num]] + [str(k) for k in BrierRS_out_rows[row_num]] 
     out_list.append(tmp_list)
 Out_File_Path = os.path.join(tables_path, 'Trained_Model_BrierConcordance_Table.csv')    
 with open(Out_File_Path, 'w',newline='') as f:
@@ -396,46 +451,46 @@ with open(Out_File_Path, 'w',newline='') as f:
     wr.writerows(out_list)   
     
 # BrierCordance BS Table - train / task / architecture, concordance BS 1-10,99, Brier BS 1-10, 99
-header = ['d','m','a'] + ConcordanceBS_header + BrierBS_header
+header = model_name_header + ConcordanceBS_header + BrierBS_header
 out_list = [header]
 for row_num in range(len(model_cluster_names)):
-    tmp_list = [str(model_cluster_names[row_num][0])] + [str(model_cluster_names[row_num][2])] + [str(model_cluster_names[row_num][3])] + [str(k) for k in ConcordanceBS_out_rows[row_num]] + [str(k) for k in BrierBS_out_rows[row_num]] 
+    tmp_list = [str(k) for k in model_cluster_names[row_num]] + [str(k) for k in ConcordanceBS_out_rows[row_num]] + [str(k) for k in BrierBS_out_rows[row_num]] 
     out_list.append(tmp_list)
 Out_File_Path = os.path.join(tables_path, 'Trained_Model_BS_BrierConcordance_Table.csv')    
 with open(Out_File_Path, 'w',newline='') as f:
     wr = csv.writer(f)
     wr.writerows(out_list)   
     
-# %% Cross-evaluation. ...
-# ... actually, it looks like we just pull entries from the summary table 
-csv_path = os.path.join(os.getcwd(), 'Summary_Tables', 'Trained_Model_Summary.csv')
-my_data = np.genfromtxt(csv_path, delimiter=',', dtype=str)
+# # %% Cross-evaluation. ...
+# # ... actually, it looks like we just pull entries from the summary table 
+# csv_path = os.path.join(os.getcwd(), 'Summary_Tables', 'Trained_Model_Summary.csv')
+# my_data = np.genfromtxt(csv_path, delimiter=',', dtype=str)
 
-Train_fold_Ind = np.where(my_data[0] == 'Train_Folder')[0][0]
-Test_fold_Ind = np.where(my_data[0] == 'Test_Folder')[0][0]
-horizon_ind = np.where(my_data[0] == 'horizon')[0][0]
-RS_ind = np.where(my_data[0] == 'Rand_Seed')[0][0]
-PyCx_ind = np.where(my_data[0] == 'pycox_mdl')[0][0]
+# Train_fold_Ind = np.where(my_data[0] == 'Train_Folder')[0][0]
+# Test_fold_Ind = np.where(my_data[0] == 'Test_Folder')[0][0]
+# horizon_ind = np.where(my_data[0] == 'horizon')[0][0]
+# RS_ind = np.where(my_data[0] == 'Rand_Seed')[0][0]
+# PyCx_ind = np.where(my_data[0] == 'pycox_mdl')[0][0]
 
-out_list = [my_data[0]]
-for k in my_data[1:]:
-    if k[Train_fold_Ind] != k[Test_fold_Ind]: # find cases where train and test are different
-        out_list.append(k) # copy them into a new table
+# out_list = [my_data[0]]
+# for k in my_data[1:]:
+#     if k[Train_fold_Ind] != k[Test_fold_Ind]: # find cases where train and test are different
+#         out_list.append(k) # copy them into a new table
         
-        # then find the matching case where they are the same
-        for k2 in my_data[1:]:
-            if k2[Train_fold_Ind] == k2[Test_fold_Ind]: # train and test must match here
-                match_found = True
-                for ind in [horizon_ind,RS_ind,PyCx_ind]:
-                    if (k[ind] != k2[ind]):
-                        match_found = False
-                        break
-                if (match_found):
-                    out_list.append(k2) # copy that case into the table too
+#         # then find the matching case where they are the same
+#         for k2 in my_data[1:]:
+#             if k2[Train_fold_Ind] == k2[Test_fold_Ind]: # train and test must match here
+#                 match_found = True
+#                 for ind in [horizon_ind,RS_ind,PyCx_ind]:
+#                     if (k[ind] != k2[ind]):
+#                         match_found = False
+#                         break
+#                 if (match_found):
+#                     out_list.append(k2) # copy that case into the table too
             
         
-Out_File_Path = os.path.join(tables_path, 'Trained_Model_Crossval_Table.csv')    
-with open(Out_File_Path, 'w',newline='') as f:
-    wr = csv.writer(f)
-    wr.writerows(out_list)   
+# Out_File_Path = os.path.join(tables_path, 'Trained_Model_Crossval_Table.csv')    
+# with open(Out_File_Path, 'w',newline='') as f:
+#     wr = csv.writer(f)
+#     wr.writerows(out_list)   
     

@@ -42,7 +42,7 @@ def String_List_Append(Str1, Str2):
     return Str1 + [Str2]
 
 # %% Function to build the non-arg part of the job file
-def Get_Global_String_List( time_h, time_m, GPU, mem, model_type, name_suffix_list = ['091824','NoCov']):
+def Get_Global_String_List( time_h, time_m, GPU, mem, model_type, name_suffix_list = ['10032024']):
     # returns a list of strings for a partial job file corresponding to inputs.
     # time_h - int
     # time_m - int
@@ -100,7 +100,7 @@ def Get_Global_String_List( time_h, time_m, GPU, mem, model_type, name_suffix_li
     # String_List = String_List_Append(String_List, 'module load singularity') # not needed since 5/1/24
     
     # And now we build the call
-    Sing_Cmd = 'singularity exec --bind /lab-share --nv Sing_Torch_05032024.sif python3 \'Model_Runner_SurvClass.py\''
+    Sing_Cmd = 'singularity exec --bind /lab-share --nv Sing_Torch_09182024.sif python3 \'Model_Runner_XGB.py\''
     
     Sing_Cmd = Sing_Cmd + ' ' + '--Model_Name ' + Full_Model_Name
     
@@ -151,7 +151,7 @@ def make_single_job_file(Running_Arg, Model_Type):
     tmp = os.path.join(os.getcwd(), 'Jobs_Generated')
     if (os.path.isdir(tmp) == False):
         os.mkdir(tmp)
-    targ_dir = os.path.join(os.getcwd(), 'Jobs_Generated','SurvClass')
+    targ_dir = os.path.join(os.getcwd(), 'Jobs_Generated','XGB')
     if (os.path.isdir(targ_dir) == False):
         os.mkdir(targ_dir)
     file_path = os.path.join(targ_dir, job_name+'.txt')
@@ -161,14 +161,13 @@ def make_single_job_file(Running_Arg, Model_Type):
             f.write(f"{line}\n")
             
 # %% Set Global Params
-time_h = 48 # hour # BCH - 6, Code15 - 15. Double for 'Any' GPU
+time_h = 4 # hour 
 time_m = 00 # min
 
-GPU = 'Any' # Quadro_RTX or Titan_RTX or Tesla_K or Tesla_T or NVIDIA_A40 or or NVIDIA_A100 'Any' (Any is good for Eval) 
-mem = 99 # GB, must be int. MIMICIV has taken at most 249GB so far, Code15 99GB
+GPU = 'None' # Quadro_RTX or Titan_RTX or Tesla_K or Tesla_T or NVIDIA_A40 or or NVIDIA_A100 'Any' (Any is good for Eval) 
+mem = 500 # GB, must be int. MIMICIV has taken at most 249GB so far, Code15 99GB
 
 # %% Set Sweep params
-
 
 
 # running: KM and KW sweep for ribeiro and inceptiontime assuming adamw
@@ -177,12 +176,15 @@ mem = 99 # GB, must be int. MIMICIV has taken at most 249GB so far, Code15 99GB
 
 # each element of args_list MUST begin with ' --' (including the space)
 
-Model_Type_List = ['Ribeiro', 'InceptionTime'] # Ribeiro, InceptionTime
+Model_Type_List = ['XGB'] # Ribeiro, InceptionTime
 for Model_Type in Model_Type_List:
     glob_args_list = [] # args_list is a list of lists. if an appended list has more than one entry, generate job files per entry
 
-    folders = ['Code15'] # ['BCH_ECG', 'Code15', 'MIMICIV']
-    glob_args_list.append([ ' --Test_Folder ' + k + ' --Train_Folder ' + k for k in folders ])
+    test_folders = ['MIMICIV'] # ['BCH_ECG', 'Code15', 'MIMICIV']
+    glob_args_list.append([ ' --Test_Folder ' + k for k in test_folders ])
+    
+    train_folders = ['Code15'] # ['BCH_ECG', 'Code15', 'MIMICIV']
+    glob_args_list.append([ ' --Train_Folder ' + k for k in train_folders ])
         
     horizons = [1,2,5,10]
     glob_args_list.append([ ' --horizon ' + str(float(k)) for k in horizons ])
@@ -197,36 +199,43 @@ for Model_Type in Model_Type_List:
     glob_args_list.append([  ' --y_col_test_event 4'  ])
     # print('job file time/event in MIMICIV format!')
     
-    glob_args_list.append([ ' --Train True'  ])
+    # glob_args_list.append([ ' --Train True'  ])
     # args_list.append([ ' --Load Best'  ]) # exclusive with train
     
-    glob_args_list.append([ ' --epoch_end 200'  ])
+    # glob_args_list.append([ ' --epoch_end 200'  ])
     
-    Early_Stops = ['20'] #Survival Models: 'LH', 'DeepHit', 'MTLR', 'CoxPH'
-    glob_args_list.append([ ' --early_stop ' + k for k in Early_Stops ])
+    # Early_Stops = ['20'] #Survival Models: 'LH', 'DeepHit', 'MTLR', 'CoxPH'
+    # glob_args_list.append([ ' --early_stop ' + k for k in Early_Stops ])
     
-    glob_args_list.append([ ' --Validate_Every 1'  ])
+    # glob_args_list.append([ ' --Validate_Every 1'  ])
     
-    glob_args_list.append([ ' --batch_size 512'  ])
-    glob_args_list.append([ ' --GPU_minibatch_limit 64'  ])  # how many to run on GPU at a time. divisor of batch_size. 256 for CNNs, 64 for Spect, 32? for LSTM 
+    # glob_args_list.append([ ' --batch_size 512'  ])
+    # glob_args_list.append([ ' --GPU_minibatch_limit 64'  ])  # how many to run on GPU at a time. divisor of batch_size. 256 for CNNs, 64 for Spect, 32? for LSTM 
     
-    glob_args_list.append([ ' --Norm_Func nchW'  ])          # nchW, nChw, or None
+    # glob_args_list.append([ ' --Norm_Func nchW'  ])          # nchW, nChw, or None
 
-    Optimizer = 'Adam'                                  # 'cocob' or 'Adam'
-    glob_args_list.append([ ' --optimizer ' + Optimizer  ])         
-    glob_args_list.append([ ' --Scheduler True'  ])
+    # Optimizer = 'Adam'                                  # 'cocob' or 'Adam'
+    # glob_args_list.append([ ' --optimizer ' + Optimizer  ])         
+    # glob_args_list.append([ ' --Scheduler True'  ])
     
-    glob_args_list.append([ ' --Loss_Type CrossEntropyLoss'  ])
+    # glob_args_list.append([ ' --Loss_Type CrossEntropyLoss'  ])
     
-    # Cov_Arg_List = ['[1,2]'] # MIMIC
-    # Cov_Arg_List = ['[2,5]'] # Code-15
-    # glob_args_list.append([ ' --val_covariate_col_list ' + k + ' --test_covariate_col_list ' + k for k in Cov_Arg_List ])
+    # Cov_Arg_List = ['[1,2,6,8,10,12,14,16,18,20]'] # MIMIC machine measurements and demographics
+    # Tr_Cov_Arg_List = ['[1,2]'] # MIMIC age/sex
+    Tr_Cov_Arg_List = ['[2,5]'] # Code-15
+    # Tr_Cov_Arg_List = ['[2,7]'] # BCH
+    glob_args_list.append([ ' --val_covariate_col_list ' + k  for k in Tr_Cov_Arg_List ])
     
-    glob_args_list.append([ ' --fusion_layers 3'  ])
-    glob_args_list.append([ ' --fusion_dim 128'  ])
+    Test_Cov_Arg_List = ['[1,2]'] # MIMIC age/sex
+    # Test_Cov_Arg_List = ['[2,5]'] # Code-15
+    # Test_Cov_Arg_List = ['[2,7]'] # BCH
+    glob_args_list.append([ ' --test_covariate_col_list ' + k for k in Test_Cov_Arg_List ])
     
-    glob_args_list.append([ ' --cov_layers 3'  ])
-    glob_args_list.append([ ' --cov_dim 32'  ])
+    # glob_args_list.append([ ' --fusion_layers 3'  ])
+    # glob_args_list.append([ ' --fusion_dim 128'  ])
+    
+    # glob_args_list.append([ ' --cov_layers 3'  ])
+    # glob_args_list.append([ ' --cov_dim 32'  ])
     
     
     

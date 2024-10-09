@@ -2,8 +2,10 @@
 """
 Written by Mingxuan Liu
 (minor modifications: PVL)
+# 09/12/24L discharge time no longer records admit time (only affects multimodal)
 """
 
+# %% Imports
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -13,13 +15,30 @@ import os
 
 # from tableone import TableOne
 
+# %% Data paths
+
+patient_csv_dir = "/lab-share/CHIP-Lacava-e2/Public/physionet.org/files/mimiciv/2.2/hosp/patients.csv.gz"
+# patient_csv_dir = os.path.join(os.getcwd(), 'MIMIC IV', 'patients.csv.gz')
+
+admission_csv_dir = "/lab-share/CHIP-Lacava-e2/Public/physionet.org/files/mimiciv/2.2/hosp/admissions.csv.gz"
+# admission_csv_dir = os.path.join(os.getcwd(), 'MIMIC IV', 'admissions.csv.gz')
+
+dat_ecg = pd.read_csv("/lab-share/CHIP-Lacava-e2/Public/physionet.org/files/mimic-iv-ecg/1.0/machine_measurements.csv")
+# dat_ecg = pd.read_csv(os.path.join(os.getcwd(), 'MIMIC IV', "machine_measurements.csv"))
+
+dat_record = pd.read_csv("/lab-share/CHIP-Lacava-e2/Public/physionet.org/files/mimic-iv-ecg/1.0/record_list.csv")
+# dat_record = pd.read_csv(os.path.join(os.getcwd(), 'MIMIC IV', "record_list.csv"))
+
+
+dat_dic = pd.read_csv("/lab-share/CHIP-Lacava-e2/Public/physionet.org/files/mimic-iv-ecg/1.0/machine_measurements_data_dictionary.csv")
+# dat_dic = pd.read_csv(os.path.join(os.getcwd(), 'MIMIC IV', "machine_measurements_data_dictionary.csv"))
+
+dat_note = pd.read_csv("/lab-share/CHIP-Lacava-e2/Public/physionet.org/files/mimic-iv-ecg/1.0/waveform_note_links.csv")
+# dat_note = pd.read_csv(os.path.join(os.getcwd(), 'MIMIC IV', "waveform_note_links.csv"))
+
+
 # %% Extract DoD from patients table
-
-
-# patient_csv_dir = "/lab-share/CHIP-Lacava-e2/Public/physionet.org/files/mimiciv/2.2/hosp/patients.csv.gz"
-patient_csv_dir = os.path.join(os.getcwd(), 'MIMIC IV', 'patients.csv.gz')
 dat_dod = pd.read_csv(patient_csv_dir)
-
 
 print(pd.isna(dat_dod.dod).mean())
 print(f"#patients in patients table: {len(dat_dod.subject_id.unique())}")
@@ -29,12 +48,12 @@ dat_dod.head()
 #patients in patients table: 299712
 
 # %% extract the max dischtime from each patient from admissions table
-# admission_csv_dir = "/lab-share/CHIP-Lacava-e2/Public/physionet.org/files/mimiciv/2.2/hosp/admissions.csv.gz"
-admission_csv_dir = os.path.join(os.getcwd(), 'MIMIC IV', 'admissions.csv.gz')
+
 dat_hosp = pd.read_csv(admission_csv_dir)[["subject_id", "hadm_id", "admittime","dischtime", "deathtime"]]
 print(dat_hosp.head())
 print(f"#patients in hospotal table: {len(dat_hosp.subject_id.unique())}")
 
+dat_hosp["admittime"] = [datetime.strptime(t, "%Y-%m-%d %H:%M:%S") for t in dat_hosp["admittime"]] # added PVL 07 29 24
 dat_hosp["dischtime"] = [datetime.strptime(t, "%Y-%m-%d %H:%M:%S") for t in dat_hosp["dischtime"]]
 max_disch_time = dat_hosp.groupby("subject_id").apply(lambda x: max(x.dischtime)).to_frame() # Include_Groups arg is deprecated PVL 6/12/24
 max_disch_time.columns = ["max_disch_time"]
@@ -45,7 +64,7 @@ max_disch_time
 # %% ecg table with machine measurements
 # ecg_dir = "/lab-share/CHIP-Lacava-e2/Public/physionet.org/files/mimic-iv-ecg/1.0"
 
-dat_ecg = pd.read_csv(os.path.join(os.getcwd(), 'MIMIC IV', "machine_measurements.csv"))
+
 print(dat_ecg.shape)
 print(f"#patients in ecg table: {len(dat_ecg.subject_id.unique())}")
 dat_ecg.head()
@@ -76,11 +95,10 @@ tmp = dat_ecg.groupby("subject_id")["ecg_time"].apply(lambda x: x.max() - x.min(
 tmp = [t.days for t in tmp]
 np.max(tmp) / 365
 
-dat_dic = pd.read_csv(os.path.join(os.getcwd(), 'MIMIC IV', "machine_measurements_data_dictionary.csv"))
 
 
 # %% recrod list
-dat_record = pd.read_csv(os.path.join(os.getcwd(), 'MIMIC IV', "record_list.csv"))
+
 dat_record["ecg_time"] = [datetime.strptime(t, "%Y-%m-%d %H:%M:%S") for t in dat_record["ecg_time"]]
 dat_record["ecg_date"] = [t.strftime("%Y-%m-%d") for t in dat_record["ecg_time"]]
 
@@ -111,7 +129,7 @@ dat = dat.rename(columns={"ecg_time_y":"ecg_time", "ecg_date_y":"ecg_date"})
 print(dat.shape)
 dat.head()
 
-dat_note = pd.read_csv(os.path.join(os.getcwd(), 'MIMIC IV', "waveform_note_links.csv"))
+
 dat_note["charttime"] = [datetime.strptime(t, "%Y-%m-%d %H:%M:%S") for t in dat_note["charttime"]]
 print(f"#patients in ecg note table: {len(dat_note.subject_id.unique())}")
 dat_note.head()
@@ -193,9 +211,40 @@ print(f"the maximum time-to-event in year is: {(dat['time_to_event'] /365).max()
 tmp_0 = dat.loc[dat["time_to_event"] == 0, :]
 tmp_0.loc[pd.isna(tmp_0["dod"]), ]
 
+# %% add info on admission start/end time if admitted - PVL 07 29 24. 
+# Takes ~13 min.
+# from tqdm import tqdm
+admit_start = []
+admit_end = []
+# for s_id, ecg_t in tqdm(zip(dat['subject_id'],dat['ecg_time_x']), total = len(dat['subject_id'])):
+for s_id, ecg_t in zip(dat['subject_id'],dat['ecg_time_x']):
+    
+    inds = (dat_hosp["subject_id"]==s_id)
+    
+    admits = dat_hosp["admittime"][inds]
+    dischs = dat_hosp["dischtime"][inds]
+    
+    # mark the admission start time if ECG was taken while admitted, else add 'Not Admitted'
+    appending_admit = 'Not Admitted'
+    appending_disch = 'Not Admitted'
+    for start,stop in zip(admits, dischs):
+        if (ecg_t > start) and (ecg_t < stop):
+            appending_admit =  str(start)
+            appending_disch =  str(stop)
+            break
+    admit_start.append(appending_admit)
+    admit_end.append(appending_disch)
+    
+dat["admit_time_before_ecg"] = admit_start
+dat["disch_time_after_ecg"] = admit_end
 
 
-dat.to_csv(os.path.join(os.getcwd(), 'MIMIC IV', "machine_measurements_survival.csv"))
+# %%
+
+
+
+
+dat.to_csv(os.path.join(os.getcwd(), 'MIMIC IV', "machine_measurements_survival_sept2024.csv"))
 
 # import pickle
 # with open('machine_measurements_survival.pkl', 'wb') as file:

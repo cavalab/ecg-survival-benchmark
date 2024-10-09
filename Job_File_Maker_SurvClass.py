@@ -42,7 +42,7 @@ def String_List_Append(Str1, Str2):
     return Str1 + [Str2]
 
 # %% Function to build the non-arg part of the job file
-def Get_Global_String_List( time_h, time_m, GPU, mem, model_type, name_suffix_list = ['052024']):
+def Get_Global_String_List( time_h, time_m, GPU, mem, model_type, name_suffix_list = ['10022024','Cov','BCH']):
     # returns a list of strings for a partial job file corresponding to inputs.
     # time_h - int
     # time_m - int
@@ -165,7 +165,7 @@ time_h = 48 # hour # BCH - 6, Code15 - 15. Double for 'Any' GPU
 time_m = 00 # min
 
 GPU = 'Any' # Quadro_RTX or Titan_RTX or Tesla_K or Tesla_T or NVIDIA_A40 or or NVIDIA_A100 'Any' (Any is good for Eval) 
-mem = 333 # GB, must be int. MIMICIV has taken at most 249GB so far, Code15 50GB
+mem = 199 # GB, must be int. MIMICIV has taken at most 249GB so far, Code15 99GB
 
 # %% Set Sweep params
 
@@ -177,11 +177,11 @@ mem = 333 # GB, must be int. MIMICIV has taken at most 249GB so far, Code15 50GB
 
 # each element of args_list MUST begin with ' --' (including the space)
 
-Model_Type_List = ['TimesNetClass'] # RibeiroClass, InceptionClass, TimesNetClass, LSTMClass
+Model_Type_List = ['ZeroNet'] # Ribeiro, InceptionTime, ZeroNet
 for Model_Type in Model_Type_List:
     glob_args_list = [] # args_list is a list of lists. if an appended list has more than one entry, generate job files per entry
 
-    folders = ['MIMICIV'] # ['BCH_ECG', 'Code15', 'MIMICIV']
+    folders = ['BCH_ECG'] # ['BCH_ECG', 'Code15', 'MIMICIV']
     glob_args_list.append([ ' --Test_Folder ' + k + ' --Train_Folder ' + k for k in folders ])
         
     horizons = [1,2,5,10]
@@ -202,13 +202,13 @@ for Model_Type in Model_Type_List:
     
     glob_args_list.append([ ' --epoch_end 200'  ])
     
-    Early_Stops = ['25'] #Survival Models: 'LH', 'DeepHit', 'MTLR', 'CoxPH'
+    Early_Stops = ['20'] #Survival Models: 'LH', 'DeepHit', 'MTLR', 'CoxPH'
     glob_args_list.append([ ' --early_stop ' + k for k in Early_Stops ])
     
     glob_args_list.append([ ' --Validate_Every 1'  ])
     
     glob_args_list.append([ ' --batch_size 512'  ])
-    glob_args_list.append([ ' --GPU_minibatch_limit 256'  ])  # how many to run on GPU at a time. divisor of batch_size. 
+    glob_args_list.append([ ' --GPU_minibatch_limit 256'  ])  # how many to run on GPU at a time. divisor of batch_size. 256 for CNNs, 64 for Spect, 32? for LSTM 
     
     glob_args_list.append([ ' --Norm_Func nchW'  ])          # nchW, nChw, or None
 
@@ -217,6 +217,20 @@ for Model_Type in Model_Type_List:
     glob_args_list.append([ ' --Scheduler True'  ])
     
     glob_args_list.append([ ' --Loss_Type CrossEntropyLoss'  ])
+    
+    Cov_Arg_List = ['[2,7]'] # BCH
+    # Cov_Arg_List = ['[1,2]'] # MIMIC demographic
+    # Cov_Arg_List = ['[1,2,6,8,10,12,14,16,18,20]'] # MIMIC demo + machine meas all no bool
+    # Cov_Arg_List = ['[2,5]'] # Code-15
+    glob_args_list.append([ ' --val_covariate_col_list ' + k + ' --test_covariate_col_list ' + k for k in Cov_Arg_List ])
+    
+    glob_args_list.append([ ' --fusion_layers 3'  ])
+    glob_args_list.append([ ' --fusion_dim 128'  ])
+    
+    glob_args_list.append([ ' --cov_layers 3'  ])
+    glob_args_list.append([ ' --cov_dim 32'  ])
+    
+    
     
     # Optimizer = 'cocob'
     # if Optimizer == 'cocob':

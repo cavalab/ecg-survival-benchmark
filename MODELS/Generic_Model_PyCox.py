@@ -34,11 +34,6 @@ Samplers and Datasets:
 
 
 import torch
-import torch.nn as nn
-from copy import deepcopy
-from torchvision import transforms, models
-from tqdm import tqdm
-import matplotlib.pyplot as plt
 import numpy as np
 import time
 import os
@@ -46,26 +41,29 @@ import os
 from MODELS.GenericModel import GenericModel
 
 from MODELS.Support_Functions import Save_Train_Args
-from MODELS.Support_Functions import Structure_Data_NCHW
-from MODELS.Support_Functions import Get_Norm_Func_Params
-from MODELS.Support_Functions import Normalize
-from MODELS.Support_Functions import Get_Loss_Params
-from MODELS.Support_Functions import Get_Loss
+
         
 import torchtuples as tt
-import pycox
 from pycox.models import LogisticHazard
 from pycox.models import MTLR
 from pycox.models import CoxPH # Bug on loss function if all events 0
 from pycox.models import DeepHitSingle
 
 import pandas as pd
-from pycox.evaluation import EvalSurv
-
-from numpy.fft import fft
-from scipy.signal import welch
-
 import copy
+
+# models
+from MODELS.Ribeiro_Classifier import get_ribeiro_model
+from MODELS.Ribeiro_Classifier import get_ribeiro_process_multi_image
+from MODELS.Ribeiro_Classifier import get_ribeiro_process_single_image
+
+from MODELS.InceptionTimeClassifier import get_InceptionTime_model
+from MODELS.InceptionTimeClassifier import get_InceptionTime_process_multi_image
+from MODELS.InceptionTimeClassifier import get_InceptionTime_process_single_image
+
+from MODELS.ConstantNet import get_ConstantNet_model
+from MODELS.ConstantNet import get_ConstantNet_process_single_image
+from MODELS.ConstantNet import get_ConstantNet_process_multi_image
 
 # %% Bugfix - DeepHitSingle, from pcwangustc
 # https://github.com/havakv/pycox/issues/79
@@ -80,7 +78,8 @@ def deephit_loss(scores, labels, censors):
     loss = loss_single(scores, labels, censors, rank_mat)
     return loss
 
-# %% Custom Data Sampler - PyCoxPH needs at least one positive sample per batch
+# %% Datasets, Samplers, and Collate functions
+# -- Custom Data Sampler - PyCoxPH needs at least one positive sample per batch
 from torch.utils.data.sampler import BatchSampler
 class Custom_Sampler(BatchSampler):
     """
@@ -89,39 +88,43 @@ class Custom_Sampler(BatchSampler):
     ... Hobbled together from pytorch documentation.
     This is re-created differently every epoch by the DataLoader
     """
-    def __init__(self, y_data, batch_size):
+    def __init__(self, y_data, batch_size, One_Pos_Per_GPU_Batch = False):
         # sampler gets 'data', so PID is in -3, event in -1, time in -2
         # 1. figure out length
         # 2. figure out which indices correspond to '0's (censor) and '1's  (event)
         self.num_samples = len(y_data)
-        self.y_data = y_data
+        self.y_data = y_data 
         self.batch_size = batch_size
         self.Event_Inds = [i for i,k in enumerate(y_data[:,-1]) if k==1.0]
         self.Non_Event_Inds = [i for i,k in enumerate(y_data[:,-1]) if k==0.0]
         self.weights = torch.tensor([1.0 for k in range(y_data.shape[0])])
         self.default_order = False 
+        self.One_Pos_Per_GPU_Batch = One_Pos_Per_GPU_Batch # CoxPH needs one positive case per batch to compute loss. 
         
     def __iter__(self):
         if (self.default_order == False):
             
             #3. Start by shuffling the dataset
             Random_Indices = torch.multinomial(self.weights, self.num_samples, False)
-            Num_Replacements_to_Prep = int(self.num_samples / self.batch_size) + 1
             
-            #4. Mark ceil(num_samples / batch_size) event cases that we can insert throughout this dataset to guarantee that each batch gets one positive case
-            Replacement_Indices = torch.multinomial(torch.tensor([1.0 for k in self.Event_Inds]), Num_Replacements_to_Prep, True)
-            Replacement_Indices = [self.Event_Inds[k] for k in Replacement_Indices]
-            
-            #5. Parse the shuffled order. If at any point we don't see an event for batch_size indices in a row, replace the last (non-event) index with an event idnex
-            Replace_With_Index = 0
-            k=0
-            while (k < self.num_samples):
-                start_ind = k
-                end_ind = min(k+self.batch_size, self.num_samples)
-                if (sum (self.y_data[Random_Indices[start_ind:end_ind],1]) <0.5):
-                    Random_Indices[end_ind-1] = Replacement_Indices[Replace_With_Index]
-                    Replace_With_Index = Replace_With_Index+1
-                k = k + self.batch_size
+            # If we need to enforce one positive case per batch (CoxPH only):
+            if (self.One_Pos_Per_GPU_Batch == True):
+                Num_Replacements_to_Prep = int(self.num_samples / self.batch_size) + 1
+                
+                #4. Mark ceil(num_samples / batch_size) event cases that we can insert throughout this dataset to guarantee that each batch gets one positive case
+                Replacement_Indices = torch.multinomial(torch.tensor([1.0 for k in self.Event_Inds]), Num_Replacements_to_Prep, True)
+                Replacement_Indices = [self.Event_Inds[k] for k in Replacement_Indices]
+                
+                #5. Parse the shuffled order. If at any point we don't see an event for batch_size indices in a row, replace the last (non-event) index with an event idnex
+                Replace_With_Index = 0
+                k=0
+                while (k < self.num_samples):
+                    start_ind = k
+                    end_ind = min(k+self.batch_size, self.num_samples)
+                    if (sum (self.y_data[Random_Indices[start_ind:end_ind],-1]) <0.5): # switched "+1" to "-1" 09/24/24
+                        Random_Indices[end_ind-1] = Replacement_Indices[Replace_With_Index]
+                        Replace_With_Index = Replace_With_Index+1
+                    k = k + self.batch_size
        
             yield from iter(Random_Indices)
             
@@ -132,15 +135,15 @@ class Custom_Sampler(BatchSampler):
     def __len__(self):
         return self.num_samples
         
-# %% Dataset functions. PyCox needs everything either frontloaded or done by the dataset (can't access the batch after it's loaded to e.g. normalize the whole thing)
-
+#  Dataset functions. PyCox needs everything either frontloaded or done by the dataset (can't access the batch after it's loaded to e.g. normalize the whole thing)
 class Dataset_FuncList(torch.utils.data.Dataset):
     # Applies functions in func_list, in order, to x, 
     # Returns x, (y[0], y[1]). y[0] is time (float32), y[1] is event (0 or 1, int)
     # x,y must be Tensor for CollateFunc
     # ... Return_Toggle changes if just x, or x,y are returned
     
-    def __init__(self, data, targets = None, func_list= None, discretize = False, Toggle = 'XY'):
+    def __init__(self, data, targets = None, covariates = None, func_list= None, discretize = False, Toggle = 'XY'):
+        
         self.data = data
         if (targets is not None):
             if (discretize):
@@ -151,6 +154,8 @@ class Dataset_FuncList(torch.utils.data.Dataset):
             self.targets = None
         self.func_list = func_list
         self.Return_Toggle = Toggle # 'X' - return only X. 'XY' - return both in PyCox formats
+        
+        self.Covariates = torch.tensor(covariates).to(torch.float32) # covariates, like ECG, will be float32
 
     def __getitem__(self, index): 
         if isinstance(index, slice): # ... Only LH fit requests 2 elements as a slice... to check their size?
@@ -162,27 +167,84 @@ class Dataset_FuncList(torch.utils.data.Dataset):
             for k in self.func_list:
                 x = k(x)
                 
+        z = self.Covariates[index] # let's include covariates just like this
+        # z = torch.tensor(z)
+        
         if (self.Return_Toggle =='XY'):
             y = self.targets[index]
-            return x, (y[0], y[1].to(torch.float32)) #must be tensor, (int64tensor if discretizing, else float32/64), float32tensor. Outputs as tuple.
+            return (x, z), (y[0], y[1].to(torch.float32)) #must be tensor, (int64tensor if discretizing, else float32/64), float32tensor. Outputs as tuple.
         if (self.Return_Toggle =='X'):
-            return x, # must be a tensor, NEEDS A COMMA TO BE A TUPLE containing a tensor
+            return (x, z) # must be a tensor, NEEDS A COMMA TO BE A TUPLE containing a tensor
     
     def __len__(self):
         return self.data.shape[0]
 
 def collate_fn(batch):
-    return tt.tuplefy(batch).stack() # demands torch tensors
+    # batch is a list of tuples of tensors
+    # this takes that list, stacks the tensors, and returns a tuple of stacked tensors
+    # ultimately we have to match ... input, target = dataloader()
+    # ^ lumping x,z into a tuple in the dataset works
+    return tt.tuplefy(batch).stack() # demands list of tuples of torch tensors
 
 # %%  ---------------- Start the model
 class Generic_Model_PyCox(GenericModel):
 
     def __init__(self, args, Data):
-        # init should be overwritten at specific model level
-        pass
-    
+        
+        
+        # 0. Process input arguments 
+        self.process_args_PyCox(args)
+        self.Data = Data
+        
+        # 1. Adjust data for this model
+        self.restructure_data()
+        self.prep_normalization_parameters()
+        self.prep_data_discretization()
+        
+        self.normalize_data()
+        if (self.max_duration is not None):
+            self.discretize_data()
+
+        # 2. Grab ECG processing network 
+        self.gen_ecg_model()
+        
+        # 3. wrap our network with the fusion modules before building optimizer/scheduler
+        self.prep_fusion(out_classes = self.Num_Classes)
+        
+        # 4. Wrap with PyCox model and init optimizer and scheduler
+        self.pycox_mdl = self.Get_PyCox_Model() # sets pycox_mdl, optimizer, scheduler
+        
+        # 5. build dataloaders (requires ECG processing model)
+        self.prep_dataloaders()
+        
+
+# %% the model
+    def gen_ecg_model(self):
+        # figures out how to summon model, image adjustment functions
+        
+        # 1 figure out output channel size
+        if 'x_train' in self.Data.keys():
+            n_in_channels = self.Data['x_train'].shape[-1]
+        else:
+            n_in_channels = 12
+        
+        if (self.args['Model_Type'] == 'Ribeiro'):
+            self.model = get_ribeiro_model(self.args, n_in_channels) # get the ECG interpreting model
+            self.Adjust_Many_Images = get_ribeiro_process_multi_image() # pointer to function
+            self.Adjust_One_Image = get_ribeiro_process_single_image() # pointer to function
+            
+        if (self.args['Model_Type'] == 'InceptionTime'):
+            self.model = get_InceptionTime_model(self.args, n_in_channels) # get the ECG interpreting model
+            self.Adjust_Many_Images = get_InceptionTime_process_multi_image() # pointer to function
+            self.Adjust_One_Image = get_InceptionTime_process_single_image() # pointer to function
+            
+        if (self.args['Model_Type'] == 'ZeroNet'):
+            self.model = get_ConstantNet_model(0) # get the ECG interpreting model
+            self.Adjust_Many_Images = get_ConstantNet_process_multi_image() # pointer to function
+            self.Adjust_One_Image = get_ConstantNet_process_single_image() # pointer to function
+
 # %% augment process_args, models should include this in init
-    def Process_Args_PyCox(self, args):
+    def process_args_PyCox(self, args):
         self.Process_Args(args) # call generic_model's arg processing
         
         # now add a few that are generic to pycox models
@@ -205,24 +267,20 @@ class Generic_Model_PyCox(GenericModel):
             self.Num_Classes = 1
             self.Discretize = False
 
-
-
-# %% Gather what you need to normalize / discretize later
-    def Prep_Data_Normalization_Discretization(self, args, Data):
-        # Save data to self, 
-        # if x_train, prep normalization and discretization 
-        # if no x_train in Data, will load model and prep norm/discretization there
-        # then we are loading a model and that loads normalization/discretization parameters)
+# %% data discretization
+    def prep_data_discretization(self):
         self.max_duration = None
-        # self.Data = Data
-        if 'x_train' in Data.keys():
-            self.prep_normalization_and_reshape_data(args, Data)
-            # self.Data['x_train'] = Structure_Data_NCHW(self.Data['x_train'])
-            # self.Prep_Normalization(args, self.Data)
-            self.max_duration = max(Data['y_train'][:,-2]) # time now lives @ -2
+        if 'x_train' in self.Data.keys():
+            self.max_duration = max(self.Data['y_train'][:,-2]) # time now lives @ -2
             self.labtrans = LogisticHazard.label_transform(self.num_durations)
-            self.labtrans.fit_transform(np.array([0,self.max_duration]), np.array([0,1]))
+            self.labtrans.fit_transform(np.array([0,self.max_duration]), np.array([0,1]))            
 
+    def discretize_data(self):
+        a = time.time()
+        if (self.Discretize): # discretizses time-to-event based on [100] time segments
+            for key in ['y_train', 'y_valid', 'y_test']:
+                self.Data[key][:,-2], self.Data[key][:,-1] = self.labtrans.transform(self.Data[key][:,-2], self.Data[key][:,-1]) # TTE lives in [:,-2], Event lives in [:,-1]
+        print('GenericModelPyCox: discretize_data T = ', '{:.2f}'.format(time.time()-a))
 
 # %% Overwrite Process_Data_To_Dataloaders from Generic_Model
 # This runs AFTER we have normalization and time discretization prepped from either init or load
@@ -231,40 +289,34 @@ class Generic_Model_PyCox(GenericModel):
 # 2) Discretize or normalize Data
 # 3) Prep Datasets and DataLoaders
 
-    def Process_Data_To_Dataloaders(self):
+    def prep_dataloaders(self):
         a = time.time()
         func_list = []
-        func_list.append(self.Adjust_Image) # adjust each input individually after loading
+        func_list.append(self.Adjust_One_Image) # adjust each ecg individually after loading
+        
+        # CoxPH requires one positive case per loss calculation, which the sampler can provide
+        if (self.args['pycox_mdl'] == 'CoxPH'):
+            One_Pos_Per_GPU_Batch = True
+        else:
+            One_Pos_Per_GPU_Batch = False
         
         if 'x_train' in self.Data.keys():
-            self.Data['x_train'] = Structure_Data_NCHW(self.Data['x_train'])
-            self.Data['x_train'] = Normalize(torch.Tensor(self.Data['x_train']), self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
-            if (self.Discretize):
-                self.Data['y_train'][:,-2], self.Data['y_train'][:,-1] = self.labtrans.transform(self.Data['y_train'][:,-2], self.Data['y_train'][:,-1]) # TTE lives in [:,-2], Event lives in [:,-1]
-            self.train_dataset = Dataset_FuncList(self.Data['x_train'] , targets = self.Data['y_train'][:,[-2,-1]], func_list = func_list, discretize=self.Discretize)
-            self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset, batch_size = self.GPU_minibatch_limit, collate_fn=collate_fn, sampler=Custom_Sampler(self.Data['y_train'], self.GPU_minibatch_limit)) 
+            self.train_dataset = Dataset_FuncList(self.Data['x_train'] , targets = self.Data['y_train'][:,[-2,-1]], covariates = self.Data['z_train'], func_list = func_list, discretize=self.Discretize)
+            self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset, batch_size = self.GPU_minibatch_limit, collate_fn=collate_fn, sampler=Custom_Sampler(self.Data['y_train'], self.GPU_minibatch_limit, One_Pos_Per_GPU_Batch = One_Pos_Per_GPU_Batch)) 
 
         if 'x_valid' in self.Data.keys():
-            self.Data['x_valid'] = Structure_Data_NCHW(self.Data['x_valid'])
-            self.Data['x_valid'] = Normalize(torch.Tensor(self.Data['x_valid']), self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
-            if (self.Discretize):
-                self.Data['y_valid'][:,-2], self.Data['y_valid'][:,-1] = self.labtrans.transform(self.Data['y_valid'][:,-2], self.Data['y_valid'][:,-1])
-            self.val_dataset  = Dataset_FuncList(self.Data['x_valid']  , targets = self.Data['y_valid'][:,[-2,-1]], func_list = func_list, discretize=self.Discretize )
-            self.val_dataloader = torch.utils.data.DataLoader (self.val_dataset,  batch_size = self.GPU_minibatch_limit, collate_fn=collate_fn, sampler=Custom_Sampler(self.Data['y_valid'], self.GPU_minibatch_limit)) 
+            self.val_dataset  = Dataset_FuncList(self.Data['x_valid']  , targets = self.Data['y_valid'][:,[-2,-1]], covariates = self.Data['z_valid'], func_list = func_list, discretize=self.Discretize )
+            self.val_dataloader = torch.utils.data.DataLoader (self.val_dataset,  batch_size = self.GPU_minibatch_limit, collate_fn=collate_fn, sampler=Custom_Sampler(self.Data['y_valid'], self.GPU_minibatch_limit, One_Pos_Per_GPU_Batch = One_Pos_Per_GPU_Batch)) 
 
         if 'x_test' in self.Data.keys():
-            self.Data['x_test'] = Structure_Data_NCHW(self.Data['x_test'])
-            self.Data['x_test'] = Normalize(torch.Tensor(self.Data['x_test']), self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
-            if (self.Discretize):
-                self.Data['y_test'][:,-2],  self.Data['y_test'][:,-1]  = self.labtrans.transform(self.Data['y_test'][:,-2],  self.Data['y_test'][:,-1])
-            self.test_dataset = Dataset_FuncList(self.Data['x_test'], targets = self.Data['y_test'][:,[-2,-1]], func_list = func_list, discretize=self.Discretize, Toggle='X') #Only returns X, not Y
+            self.test_dataset = Dataset_FuncList(self.Data['x_test'], targets = self.Data['y_test'][:,[-2,-1]], covariates = self.Data['z_test'], func_list = func_list, discretize=self.Discretize, Toggle='X') #Only returns X, not Y
             self.test_dataloader = torch.utils.data.DataLoader (self.test_dataset,  batch_size = self.GPU_minibatch_limit, collate_fn=collate_fn, shuffle = False) #DO NOT SHUFFLE
-        print('GenericModel_PyCox: Dataloader prep T = ', time.time() - a)
+        print('GenericModel_PyCox: Dataloader prep T = ', '{:.2f}'.format(time.time()-a))
 
 # %% Prep pycox model (here so as not to duplicate in train, load, and run)
     def Get_PyCox_Model(self):
         
-        self.Prep_Optimizer_And_Scheduler()
+        self.prep_optimizer_and_scheduler()
         
         # note: pycox_mdl optimizer is in pycox_mdl.optimizer.optimizer
         if (self.args['pycox_mdl'] == 'LH'):
@@ -280,11 +332,10 @@ class Generic_Model_PyCox(GenericModel):
 
 
 # %% Overwrite Train from Generic_Model
-    def Train(self):
+    def train(self):
         # store a copy of the best model available
         Best_Model = copy.deepcopy(self.model)
-        
-        
+
         train_loss = -1 # in case no training occurs
         # Try to load a checkpointed model?
         if self.epoch_end > self.epoch_start:
@@ -317,14 +368,15 @@ class Generic_Model_PyCox(GenericModel):
             else:
                 print('Generic_Model_PyCox.Train(): Last checkpoint unavailable.')
                 
-                
-                
+
         # Train
         for epoch in range(self.epoch_start, self.epoch_end):
 
             epoch_start_time = time.time()
             pycox_log = self.pycox_mdl.fit_dataloader(self.train_dataloader, epochs=1, verbose=True, val_dataloader=self.val_dataloader) 
             epoch_end_time = time.time()
+            
+            # breakpoint()
             
             # get train, val loss
             temp = pycox_log.get_measures()
@@ -386,21 +438,18 @@ class Generic_Model_PyCox(GenericModel):
         return train_loss
 
 # %% Model Loading
-    def Load(self, best_or_last):
-        print('load Should be overwritten in model file!')
-        quit()
         
     # After we load a model, we might need to re-do discretization. Currently, this has no effect since we load the training data each time
-    def Discretize_On_Load(self, Import_Dict):
-        if ('max_duration' in Import_Dict.keys()):
-            if (self.Num_Classes > 1): # If we're loading an LH/MTLR/DeepHit model, overwrite number of discretization time steps
-                self.num_durations = self.Num_Classes
-            self.max_duration = Import_Dict['max_duration']
-            self.labtrans = LogisticHazard.label_transform(self.num_durations)
-            self.labtrans.fit_transform(np.array([0,self.max_duration]), np.array([0,1])) 
-        else:
-            print('cant discretize data on load')
-            exit()
+    # def Discretize_On_Load(self, Import_Dict):
+    #     if ('max_duration' in Import_Dict.keys()):
+    #         if (self.Num_Classes > 1): # If we're loading an LH/MTLR/DeepHit model, overwrite number of discretization time steps
+    #             self.num_durations = self.Num_Classes
+    #         self.max_duration = Import_Dict['max_duration']
+    #         self.labtrans = LogisticHazard.label_transform(self.num_durations)
+    #         self.labtrans.fit_transform(np.array([0,self.max_duration]), np.array([0,1])) 
+    #     else:
+    #         print('cant discretize data on load')
+    #         exit()
             
         # If we _did_ want to process a new test set without loading the training set, we'd need to normalize/discretize the data after loading an existing model:
         # if (self.max_duration is not None):
@@ -411,7 +460,18 @@ class Generic_Model_PyCox(GenericModel):
     def Run_NN (self, my_dataloader):
 
         if (self.args['pycox_mdl'] == 'CoxPH'):
-            self.pycox_mdl.compute_baseline_hazards(input=self.Adjust_Many_Images(self.Data['x_train'][:,0,:,:]),target=[self.Data['y_train'][:,-2],self.Data['y_train'][:,-1]],batch_size = self.GPU_minibatch_limit)
+            # ugly, but necessary
+
+            # okay, so we're passing input,target
+            # input needs to be a tuple of tensors
+            
+            # don't actually store to any variables - can be expensive
+            # a = self.Adjust_Many_Images(self.Data['x_train'][:,0,:,:])
+            # b = torch.tensor(self.Data['z_train']).to(torch.float32)
+            # self.pycox_mdl.compute_baseline_hazards(input= (a,b), target=[self.Data['y_train'][:,-2],self.Data['y_train'][:,-1]],batch_size = self.GPU_minibatch_limit)
+            
+            self.pycox_mdl.compute_baseline_hazards(input= (self.Adjust_Many_Images(self.Data['x_train']),torch.tensor(self.Data['z_train']).to(torch.float32)), target=[self.Data['y_train'][:,-2],self.Data['y_train'][:,-1]],batch_size = self.GPU_minibatch_limit)
+            # note: because we use validation performance to pick the model, we can't build the baselines on validation while that is going on (that's like fitting on the test set)
            
         surv    = self.pycox_mdl.predict_surv(my_dataloader)
         surv_df = self.pycox_mdl.predict_surv_df(my_dataloader) # contains surv, also stores 'index' which is the time in years rather than discretized points
@@ -471,6 +531,28 @@ class Generic_Model_PyCox(GenericModel):
         else:
             cuts, t, d, surv, surv_df  = self.Run_NN(self.test_dataloader) # this is an UNSHUFFLED dataloader sent through TorchTuples (only output x, can't recover shufled y if shuffled)
         return cuts, t, d, surv, surv_df
+
+# %% Model Loading
+    def Load(self, best_or_last):
+        
+        Import_Dict = self.Load_Checkpoint(best_or_last)   
+        self.Load_Training_Params(Import_Dict)
+        self.Load_Training_Progress(Import_Dict)
+        self.Load_Normalization(Import_Dict) # we're frontloading normalization, so that doesn't matter
+
+        self.model.load_state_dict(Import_Dict['model_state_dict'])
+        
+        if ('optimizer_state_dict' in Import_Dict.keys()):
+            self.optimizer.load_state_dict(Import_Dict['optimizer_state_dict'])
+        else:
+            print('NO optimizer loaded')
+        if ('scheduler_state_dict' in Import_Dict.keys()):
+            self.scheduler.load_state_dict(Import_Dict['scheduler_state_dict'])
+        else:
+            print("NO scheduler loaded")
+
+        self.Load_Random_State(Import_Dict)
+
 
 # %% Overwrite save
 def Save_NN_PyCox(epoch, model, path, best_performance_measure=9999999, optimizer=None, scheduler=None, NT=None, NM=None, NS=None, max_duration=None):

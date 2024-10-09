@@ -78,7 +78,8 @@ Currently, all models reshape it into N-C-H-W
 # handle pycox folder requirement FIRST
 import os
 os.environ['PYCOX_DATA_DIR'] = os.path.join(os.getcwd(),'Mandatory_PyCox_Dir')
-from pycox.utils import kaplan_meier
+
+from Model_Runner_Support import get_covariates
 
 from Model_Runner_Support import Load_Data
 from Model_Runner_Support import Clean_Data
@@ -93,19 +94,14 @@ from Model_Runner_Support import Gen_KM_Bootstraps
 from Model_Runner_Support import Gen_Concordance_Brier_No_Bootstrap
 from Model_Runner_Support import Gen_Concordance_Brier_PID_Bootstrap
 from Model_Runner_Support import Gen_AUROC_AUPRC
-from Model_Runner_Support import print_classifier_ROC
 from Model_Runner_Support import save_histogram
 
 from MODELS.Support_Functions import Save_to_hdf5
 
-from MODELS import Support_Functions
-from MODELS import InceptionTimeRegression_PyCox
-from MODELS import Ribeiro_Regression_PyCox
-from MODELS import LSTMReg_PyCox
-from MODELS import TimesNetReg_PyCox
-from MODELS import SpectCNNReg_PyCox
 
-import h5py
+
+from MODELS import Generic_Model_PyCox
+
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -157,6 +153,7 @@ def Run_Model(args):
         print('Model_Name not specified - cant train or pull models')
         exit()
     Model_Type = args['Model_Name'].split('_')[0]
+    args['Model_Type'] = Model_Type
 
     if ('Train_Folder' not in args.keys()):
         print('Train_Folder not specified - cant train or pull models')
@@ -175,6 +172,9 @@ def Run_Model(args):
     torch.manual_seed(args['Rand_Seed'])
     torch.backends.cudnn.deterministic = True # make TRUE if you want reproducible results (slower)
     
+    # Y covariate indices get passed here
+    val_covariate_col_list, test_covariate_col_list = get_covariates(args)
+    
     # %% Process data: Load, Clean, Split
     Data, Train_Col_Names, Test_Col_Names = Load_Data(args) # Data is a dict, so passed by reference from now on
     Clean_Data(Data, args)       # remove TTE<0 and NaN ECG
@@ -182,26 +182,39 @@ def Run_Model(args):
     Split_Data(Data)             # splits 'train' data 80/20 into train/val by PID
     DebugSubset_Data(Data, args) # If args['debug'] == True, limits Data[...] to 1k samples each of tr/val/test.
     
+    # augment data with reshaped covariates
+    for key in ['train', 'valid']:
+        y_key = 'y_'+key
+        z_key = 'z_'+key # for covariates
+        Data[z_key] = Data[y_key][:,val_covariate_col_list]
+        
+    for key in ['test']:
+        y_key = 'y_'+key
+        z_key = 'z_'+key # for covariates
+        Data[z_key] = Data[y_key][:,test_covariate_col_list]
+    
     # %% 5. set up trained model folders if they  don't exist
     set_up_train_folders(args)
     
     # %% 6. Select model, (maybe) load an existing model. ask for training (runs eval after training reqs met)
-    print('Model_Runner:  Got to model init. Total time elapsed: ' + str(time.time()-start_time) )
-    if (Model_Type == 'InceptionTimeReg'):
-        asdf = InceptionTimeRegression_PyCox.InceptionTimeRegression_PyCox(args, Data)
-    if (Model_Type == 'RibeiroReg'):
-        asdf = Ribeiro_Regression_PyCox.Ribeiro_Regression_PyCox(args, Data)
-    if (Model_Type == 'LSTMReg'):
-        asdf = LSTMReg_PyCox.LSTMReg_PyCox(args, Data)
-    if (Model_Type == 'TimesNetReg'):
-        asdf = TimesNetReg_PyCox.TimesNetReg_PyCox(args, Data)
-    if (Model_Type == 'SpectCNNReg'):
-        asdf = SpectCNNReg_PyCox.SpectCNNReg_PyCox(args, Data)
+    print('Model_Runner:  Got to model init. Total time elapsed: ' ,'{:.2f}'.format(time.time()-start_time) )
+    asdf = Generic_Model_PyCox.Generic_Model_PyCox(args, Data)
+    
+    # if (Model_Type == 'InceptionTimeReg'):
+    #     asdf = InceptionTimeRegression_PyCox.InceptionTimeRegression_PyCox(args, Data)
+    # if (Model_Type == 'RibeiroReg'):
+    #     asdf = Ribeiro_Regression_PyCox.Ribeiro_Regression_PyCox(args, Data)
+    # if (Model_Type == 'LSTMReg'):
+    #     asdf = LSTMReg_PyCox.LSTMReg_PyCox(args, Data)
+    # if (Model_Type == 'TimesNetReg'):
+    #     asdf = TimesNetReg_PyCox.TimesNetReg_PyCox(args, Data)
+    # if (Model_Type == 'SpectCNNReg'):
+    #     asdf = SpectCNNReg_PyCox.SpectCNNReg_PyCox(args, Data)
       
-    print('Model_Runner:  Got to Train. Total time elapsed: ' + str(time.time()-start_time) )
+    print('Model_Runner:  Got to Train. Total time elapsed: ' ,'{:.2f}'.format(time.time()-start_time) )
     if( ('Load' in args.keys())):
         asdf.Load(args['Load'])
-    asdf.Train()
+    asdf.train()
         
     
     # %% Generate and save out results
@@ -210,7 +223,8 @@ def Run_Model(args):
     # To evaluate model we need: dicrete time points, discretized time to event, event 0/1, S(t) per time point
     
     if ('Test_Folder' in args.keys()):
-        print('Model_Runner:  got to model eval. Total Time elapsed: ' + str(time.time()-start_time))
+        
+        print('Model_Runner:  got to model eval. Total Time elapsed: ' ,'{:.2f}'.format(time.time()-start_time))
         
         if ('num_durations' not in args.keys()):
             args['num_durations'] = '100'
@@ -233,7 +247,7 @@ def Run_Model(args):
         # %% Set up folders and save eval args
         set_up_test_folders(args)
              
-        # %% 15. Save out everything we need to recreate evaluation: 
+        # %% 15. Save out everything we need to recreate evaluation (or later sub-group concordance): 
         outputs_hdf5_path = os.path.join(args['Model_Eval_Path'], 'Stored_Model_Output.hdf5')
         Save_to_hdf5(outputs_hdf5_path, sample_time_points, 'sample_time_points')
         Save_to_hdf5(outputs_hdf5_path, disc_y_t, 'disc_y_t') # when it really happened
@@ -265,7 +279,7 @@ def Run_Model(args):
         # histogram
         save_histogram(sample_time_points, disc_y_t, surv, args)
         
-        print('Model_Runner: Finished evaluation. Total time elapsed: ' + str(time.time()-start_time) )
+        print('Model_Runner: Finished evaluation. Total time elapsed: ' ,'{:.2f}'.format(time.time()-start_time) )
         
         
     #%% Test?

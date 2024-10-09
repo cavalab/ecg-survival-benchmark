@@ -68,7 +68,6 @@ import os
 import copy
 
 # import Support_Functions
-from MODELS.Support_Functions import Custom_Dataset
 from MODELS.Support_Functions import Save_NN
 from MODELS.Support_Functions import Save_Train_Args
 from MODELS.Support_Functions import Structure_Data_NCHW
@@ -77,14 +76,78 @@ from MODELS.Support_Functions import Normalize
 from MODELS.Support_Functions import Get_Loss_Params
 from MODELS.Support_Functions import Get_Loss
 
-# LSTM support functions
-# from MODELS.Support_Functions import CustomDatasetLSTM
-# from MODELS.Support_Functions import CustomSamplerLSTM
-# from MODELS.Support_Functions import Custom_Collate_LSTM
         
+# %% The generic net (encode / decode)
+class FusionModel(nn.Module):
+    # We encode the ECG with some passed model
+    # We process covariates with a linear model
+    # Then we combine them with a fusion model
+    # ... or we just decode the ECG with a linear layer
+    
+    def __init__(self, ECG_Model, out_classes, fusion_layers, fusion_dim, cov_layers, cov_dim):
+        # inputs:
+        # ECG_Model: a CNN or something that processes ECG to features (encoder)
+        # out_classes: number of output classes from the fusionmodel
+        # direct: if direct, only adds a linear layer between features and out_classes
+        #     if indirect,adds 2 linear/relu chunks first 
+
+        
+        super(FusionModel, self).__init__()
+        # ECG processing chunk
+        self.ECG_Model = ECG_Model
+        
+        # Covariate processing chunk
+        self.covariate_module_list = nn.ModuleList()
+        for k in range(cov_layers):
+            self.covariate_module_list.append(nn.LazyLinear(out_features=cov_dim))
+            self.covariate_module_list.append(nn.ReLU())
+        
+        # Fusion chunk and final linear chunk
+        self.fusion_module_list = nn.ModuleList()
+        for k in range(fusion_layers):
+            self.fusion_module_list.append(nn.LazyLinear(out_features=fusion_dim))
+            self.fusion_module_list.append(nn.ReLU())
+            
+        self.fusion_module_list.append(nn.LazyLinear(out_features=out_classes))
+        
+        # extra variables in case we want to return the '-1' layer
+        self.return_second_to_last_layer = False
+        
+    def forward(self, x, z):
+        # x - ECG
+        # z - covariates - float32
+        
+        # process ECG
+        a = self.ECG_Model(x) 
+        
+        # process covariates and append. 
+        # only happens if 1) covariates provided and 2) covariate modules initialized
+        if (z.shape[1] > 0):
+            if (len(self.covariate_module_list) > 0):
+                b = z
+                for covariate_layer in self.covariate_module_list:
+                    b = covariate_layer(b)
+                a = torch.concatenate( (a,b),dim=1)
+        
+        # apply fusion layers (includes final linear layer)
+        for i,fusion_layer in enumerate(self.fusion_module_list):
+            
+            # if you want to return the second-to-last layer, do so here
+            if (i == len(self.fusion_module_list) - 1 ): # when on last layer
+                if(self.return_second_to_last_layer): 
+                    return a
+                
+            # otherwise keep applying layers
+            a = fusion_layer(a)
+            
+        return a
+
+    
+# %%
+    
 class GenericModel:
     
-    def __init__(self): # doesn't automatically init; the specific_model should call/overwrite/extend the generic functions here
+    def __init__(self): # doesn't automatically init; generic_model_x should call/overwrite/extend the generic functions here
         pass
     
     # %% Init components
@@ -94,6 +157,7 @@ class GenericModel:
         # CUDA
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print('Set to Run on ' + str(self.device))
+        
         
         # Optimizer
         if ('optimizer' in args.keys()):
@@ -173,72 +237,80 @@ class GenericModel:
                 self.min_lr = 1e-7 # scaled by 1e-1 later
             else:
                 self.min_lr=1e-2 # scaled by 1e-1 later
-                
-                
-        # Is this an lstm?
-        self.LSTM = False
-        if ('LSTM' in args.keys()):
-            if args['LSTM'] == 'True':
-                self.LSTM = True
-            
 
         # Model Folder Path
         self.model_folder_path = args['Model_Folder_Path']
-        
         
         # Prep training parameters (that can be overwritten by load() )
         self.Val_Best_Loss = 9999999
         self.Perf = []
         
-    # %% Process Data - normalize, convert to tensors
-    def Prep_Dataloaders_and_Normalize_Data(self):
+    # %% Data pieces
+    
+    def restructure_data(self):
         a = time.time()
-        if 'x_train' in self.Data.keys():
-            self.Data['x_train']  = Structure_Data_NCHW(self.Data['x_train'])
-            self.Data['x_train']  = Normalize(torch.Tensor(self.Data['x_train']), self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
-            self.Data['y_train']  = np.float64(self.Data['y_train']) #8/6/24
-            self.train_dataset = Custom_Dataset( self.Data['x_train'] , self.Data['y_train'][:,-1]) # modified event, e*, lives in -1
-            self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset, batch_size = self.GPU_minibatch_limit, shuffle = True) # weighted sampler is mutually exclussive with shuffle = True
-            
-        if 'x_valid' in self.Data.keys():
-            self.Data['x_valid']  = Structure_Data_NCHW(self.Data['x_valid'])
-            self.Data['x_valid']  = Normalize(torch.Tensor(self.Data['x_valid']), self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
-            self.Data['y_valid']  = np.float64(self.Data['y_valid']) #8/6/24
-            self.val_dataset = Custom_Dataset(self.Data['x_valid']  , self.Data['y_valid'][:,-1]) # modified event, e*, lives in -1
-            self.val_dataloader = torch.utils.data.DataLoader (self.val_dataset,  batch_size = self.GPU_minibatch_limit, shuffle = False) #DO NOT SHUFFLE
-
-        if 'x_test' in self.Data.keys():
-            self.Data['x_test'] = Structure_Data_NCHW(self.Data['x_test'])
-            self.Data['x_test']  = Normalize(torch.Tensor(self.Data['x_test']), self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
-            self.Data['y_test']  = np.float64(self.Data['y_test']) #8/6/24
-            self.test_dataset  = Custom_Dataset(self.Data['x_test']  , self.Data['y_test'][:,-1]) # modified event, e*, lives in -1
-            self.test_dataloader = torch.utils.data.DataLoader (self.test_dataset,  batch_size = self.GPU_minibatch_limit, shuffle = False) #DO NOT SHUFFLE
-        print('GenericModel: Data restructuring, normalization, and dataloader prep T = ', time.time() - a)
-
-
-    def prep_normalization_and_reshape_data(self, args, Data):
+        for key in ['x_train', 'x_valid', 'x_test']:
+            if key in self.Data.keys() :
+                self.Data[key] = Structure_Data_NCHW(self.Data[key])
+        print('GenericModel: restructure_data T = ', '{:.2f}'.format(time.time()-a))
+                
+    def prep_normalization_parameters(self):
         a = time.time()
-        self.Data = Data
-        # need to reshape x_train now that we're frontloading normalization
-        self.Data['x_train'] = Structure_Data_NCHW(self.Data['x_train'])
-        
-        if 'x_train' in Data.keys():            
-            self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev = Get_Norm_Func_Params(args, Data['x_train'])
+        if 'x_train' in self.Data.keys():            
+            self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev = Get_Norm_Func_Params(self.args, self.Data['x_train'])
         else:
             print('Cant prep normalization')
-        print('GenericModel: Train ECG reshape and normalization param calc T = ', time.time() - a)
+        print('GenericModel: prep_normalization_parameters T = ', '{:.2f}'.format(time.time()-a))
+        
+    def normalize_data(self):
+        a = time.time()
+        for key in ['x_train', 'x_valid', 'x_test']:
+            if key in self.Data.keys() :
+                self.Data[key] = Normalize(torch.Tensor(self.Data[key]), self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
+        print('GenericModel: normalize_data T = ', '{:.2f}'.format(time.time()-a))
+        
+    
 
-    def Prep_LossFunction(self, args, Data):
-        if 'y_train' in Data.keys():     
-            self.Loss_Params = Get_Loss_Params(args, Train_Y = Data['y_train'])
-        elif ('Loss_Type' in args.keys()):
-            self.Loss_Params = Get_Loss_Params(args) 
+# %% Network pieces
+    # %% Fusion pieces
+    
+    def prep_fusion(self, out_classes = 2):
+        
+        # Process Fusion args
+        if ('fusion_layers' in self.args.keys()):
+            fusion_layers = int(self.args['fusion_layers'])
         else:
-            args['Loss_Type'] = 'SSE'
+            fusion_layers = 0
+            
+        if ('cov_layers' in self.args.keys()):
+            cov_layers = int(self.args['cov_layers'])
+        else:
+            cov_layers = 0
+            
+        if ('fusion_dim' in self.args.keys()):
+            fusion_dim = int(self.args['fusion_dim'])
+        else:
+            fusion_dim = 128
+            
+        if ('cov_dim' in self.args.keys()):
+            cov_dim = int(self.args['cov_dim'])
+        else:
+            cov_dim = 32
+            
+        self.model = FusionModel(self.model, out_classes, fusion_layers, fusion_dim, cov_layers, cov_dim)
+        self.model.to(self.device)
+        
+    def prep_classif_loss(self):
+        if 'y_train' in self.Data.keys():     
+            self.Loss_Params = Get_Loss_Params(self.args, Train_Y = self.Data['y_train'])
+        elif ('Loss_Type' in self.args.keys()):
+            self.Loss_Params = Get_Loss_Params(self.args) 
+        else:
+            self.args['Loss_Type'] = 'SSE'
             print ('By default, using SSE loss')
-            self.Loss_Params = Get_Loss_Params(args) 
+            self.Loss_Params = Get_Loss_Params(self.args) 
 
-    def Prep_Optimizer_And_Scheduler(self):
+    def prep_optimizer_and_scheduler(self):
         
         if (self.optimizer_name == 'cocob'):
             from parameterfree import COCOB
@@ -260,7 +332,6 @@ class GenericModel:
             
             
     # %% 'Load' components
-            
     def Load_Checkpoint(self, best_or_last):
         if (best_or_last == 'Last'):
             some_path = os.path.join(self.model_folder_path, 'Checkpoint.pt')
@@ -323,176 +394,7 @@ class GenericModel:
             self.Normalize_Type  = 'No_Norm'
             self.Normalize_Mean  = 0
             self.Normalize_StDev = 0
-    
-    
         
-# %% Adjust each ECG as it comes in. Importantly, this is on CPU!
-    def Adjust_Image(self, single_image):
-        # Keep in mind that pycox
-        # Normalization and Tensor conversion now frontloaded (CPU) for speed
-        return single_image
-    
-# %% Adjust many ECGs, on CPU, for model calibration
-    def Adjust_Many_Images(self, image_batch):
-        # Keep in mind that pycox
-        # Normalization and Tensor conversion now frontloaded (CPU) for speed
-        return image_batch    
-     
-
-    # %% tuned for classifier
-    def Train(self):
-        Best_Model = copy.deepcopy(self.model)
-        
-        train_loss = -1 # in case no training occurs
-        accumulation_iterations = int(self.batch_size / self.GPU_minibatch_limit)
-        
-        # Try to load a checkpointed model?
-        if self.epoch_end > self.epoch_start:
-            print('GenericModel.Train(): Training Requested. Loading best then last checkpoints.')
-            last_checkpoint_path = os.path.join(self.model_folder_path, 'Checkpoint.pt')
-            best_checkpoint_path = os.path.join(self.model_folder_path, 'Best_Checkpoint.pt')
-            if (os.path.isfile(last_checkpoint_path)):
-                if (os.path.isfile(best_checkpoint_path)):
-                    self.Load('Best')
-                    Best_Model = copy.deepcopy(self.model)
-                    print('GenericModel.Train(): Best Checkpoint loaded and Best model copied.')
-                    self.Load('Last')
-                    print('GenericModel.Train(): Checkpointed model loaded. Will resume training.')
-                    
-                    val_perfs = np.array([k[2] for k in self.Perf])
-                    if (self.early_stop > 0):
-                        if (len(val_perfs) - (np.argmin(val_perfs) + 1 ) ) >= self.early_stop:
-                            # ^ add one: len_val_perfs is num trained epochs (starts at 1), but argmin starts at 0.
-                            print('GenericModel.Train(): Model at early stop. Setting epoch_start to epoch_end to cancel training')
-                            self.epoch_start = self.epoch_end
-                            
-                    if (self.epoch_start == self.epoch_end):
-                        print('GenericModel.Train(): Loaded checkpointed model already trained')
-                    if (self.epoch_start > self.epoch_end):
-                        print('GenericModel.Train(): Requested train epochs > current epochs trained. evaluating.')
-                        self.epoch_start = self.epoch_end
-                        # breakpoint()
-                else:
-                    print('GenericModel.Train(): FAILED to load best model! Eval may be compromised')
-            else:
-                print('GenericModel.Train(): Last checkpoint unavailable.')
-        
-        
-        for epoch in range(self.epoch_start, self.epoch_end):
-            self.model.train()
-            epoch_start_time = time.time()
-            
-            train_loss = 0
-            for i, (imgs , labels) in enumerate(self.train_dataloader):
-
-                imgs = imgs.to(self.device)
-                imgs = imgs.to(torch.float32) # convert to float32 AFTER putting on GPU
-                # imgs = Normalize(imgs, self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
-                imgs = self.Adjust_Many_Images(imgs)
-                
-                labels = labels.to(self.device)
-                labels = labels.type(torch.float32) # again, convert type AFTER putting on GPU
-                
-
-                model_out = self.model(imgs)
-                
-                
-                loss = Get_Loss(model_out, labels, self.Loss_Params) 
-                train_loss += loss.item()
-                loss.backward()
-                
-                # minibatch implem - from https://kozodoi.me/blog/20210219/gradient-accumulation
-                if  ( ((i + 1) % accumulation_iterations ==0) or (i+1) == len(self.train_dataloader)):
-                    self.optimizer.step() 
-                    self.model.zero_grad()  
-
-            epoch_end_time = time.time()
-
-            # ----
-            # Run Validation and Checkpoint
-            if ( (epoch+1) % self.validate_every ==0):
-                
-                outputs, val_loss, correct_outputs = self.Run_NN(self.val_dataloader)
-                
-                # update scheduler # no effect unless args['Scheduler'] == 'True'
-                if (hasattr(self,'scheduler')):
-                    self.scheduler.step(val_loss)
-                    tmp_LR = self.optimizer.state_dict()['param_groups'][0]['lr']
-                else:
-                    tmp_LR = 0
-                    
-                # If this is the new best model, save it as the best model
-                if val_loss < self.Val_Best_Loss: 
-                    nn_file_path = os.path.join(self.model_folder_path, 'Best_Checkpoint.pt')
-                    if (self.Save_Out_Best):
-                        Save_NN(epoch, self.model, nn_file_path, optimizer=None, scheduler=None, best_performance_measure = val_loss, NT = self.Normalize_Type, NM = self.Normalize_Mean, NS = self.Normalize_StDev)
-                        Best_Model = copy.deepcopy(self.model) # store a local copy of the model
-                    Save_Train_Args(os.path.join(self.model_folder_path,'Train_Args.txt'), self.args)
-                    self.Val_Best_Loss = val_loss
-                    
-                # And checkpoint model in any case
-                nn_file_path = os.path.join(self.model_folder_path, 'Checkpoint.pt')
-                if (self.Save_Out_Checkpoint):
-                    if (hasattr(self,'scheduler')):
-                        Save_NN(epoch, self.model, nn_file_path, optimizer = self.optimizer, scheduler=self.scheduler, best_performance_measure = val_loss, NT = self.Normalize_Type, NM = self.Normalize_Mean, NS = self.Normalize_StDev)
-                    else:
-                        Save_NN(epoch, self.model, nn_file_path, optimizer = self.optimizer, scheduler=None, best_performance_measure = val_loss, NT = self.Normalize_Type, NM = self.Normalize_Mean, NS = self.Normalize_StDev)
-                Save_Train_Args(os.path.join(self.model_folder_path,'Train_Args.txt'), self.args)
-
-                # calculate new performance
-                new_perf = [epoch, train_loss, val_loss, tmp_LR, epoch_end_time - epoch_start_time]
-                print(new_perf)
-                self.Perf.append(new_perf)
-                
-                # update performance                
-                csv_file_path = os.path.join(self.model_folder_path, 'Training_Progress.csv')
-                np.savetxt(csv_file_path, np.asarray(self.Perf), header = "Epoch,Train Loss, Validation Loss, LR, Runtime seconds",delimiter = ',')
-                
-                # save out performance curves
-                Perf_Plot_Path = os.path.join(self.model_folder_path, 'Training_Plot.png')
-                self.Save_Perf_Curves(self.Perf, Perf_Plot_Path)
-                
-                # consider stopping
-                val_perfs = np.array([k[2] for k in self.Perf])
-                if (self.early_stop > 0):
-                    if (len(val_perfs) - (np.argmin(val_perfs) + 1 ) ) >= self.early_stop:
-                        # ^ add one: len_val_perfs is num trained epochs (starts at 1), but argmin starts at 0.
-                        break
-                     
-        # now that we're done training, load the best model back for evaluation
-        self.model = copy.deepcopy(Best_Model)
-        return train_loss
-    
-    # %% Run
-    def Run_NN (self, my_dataloader):
-        # Runs the net in eval mode, predicted output, loss, correct output
-        self.model.eval()
-        
-        tot_loss = 0
-        
-        outputs = []
-        correct_outputs = [] 
-        
-        for i, (imgs , labels) in enumerate(my_dataloader):
-            imgs = imgs.to(self.device)
-            imgs = imgs.to(torch.float32) # convert to float32 AFTER putting on GPU
-            # imgs = Normalize(imgs, self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
-            imgs = self.Adjust_Many_Images(imgs)
-            
-            labels = labels.to(self.device)
-            labels = labels.type(torch.float32) # again, convert type AFTER putting on GPU
-        
-            with torch.no_grad():
-                model_out = self.model(imgs)
-            
-            loss = Get_Loss(model_out, labels, self.Loss_Params) 
-        
-            tot_loss += loss.item()
-            outputs = outputs + model_out.to("cpu").detach().tolist()
-            correct_outputs = correct_outputs + labels.to("cpu").detach().tolist()
-        
-        return outputs, tot_loss, correct_outputs
-    
     # %% save out performance curves
     def Save_Perf_Curves (self,Perf, Path):
         temp = np.array(Perf)
@@ -509,15 +411,5 @@ class GenericModel:
         plt.ylabel('Training Loss')
         plt.title('Training and Validation Loss')
         plt.savefig(Path)
+        
     
-    # %% Test
-    def Test(self, Which_Dataloader = 'Test'):
-        if (Which_Dataloader == 'Train'):            
-            self.train_dataloader.batch_sampler.shuffle = False
-            outputs, test_loss, correct_outputs = self.Run_NN(self.train_dataloader) # NOT shuffled
-            self.train_dataloader.batch_sampler.shuffle = True
-        elif (Which_Dataloader == 'Validation'):
-            outputs, test_loss, correct_outputs = self.Run_NN(self.val_dataloader) # NOT shuffled
-        else:
-            outputs, test_loss, correct_outputs = self.Run_NN(self.test_dataloader) # NOT shuffled
-        return outputs, test_loss, correct_outputs

@@ -19,20 +19,12 @@ import os, h5py
 
 from torch.utils.data.sampler import BatchSampler
 
+
 # %% Generic Dataset used by classifiers
-class Custom_Dataset(torch.utils.data.Dataset):
-    def __init__(self, data, targets):
-        self.data = data
-        self.targets = targets
-        
-    def __getitem__(self, index):
-        x = self.data[index] # if you ever modify this value, torch.clone it first (else permanent)
-        y = self.targets[index]
-        return x, y
+
     
-    def __len__(self):
-        return self.data.shape[0]
-         
+
+    
 # %% Save out a neural net
 def Save_NN(epoch, model, path, best_performance_measure=9999999, optimizer=None, scheduler=None, NT=None, NM=None, NS=None):
     # https://pytorch.org/tutorials/recipes/recipes/saving_and_loading_a_general_checkpoint.html

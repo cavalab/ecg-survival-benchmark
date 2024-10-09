@@ -178,8 +178,12 @@ class ResNet1d(nn.Module):
         # Linear layer
         n_filters_last, n_samples_last = blocks_dim[-1]
         last_layer_dim = n_filters_last * n_samples_last
-        self.lin = nn.Linear(last_layer_dim, n_classes)
         self.n_blk = len(blocks_dim)
+        
+        # PVl mod 09/5/24, if n_class = 0, return features
+        self.n_classes = n_classes
+        if (n_classes > 0):
+            self.lin = nn.Linear(last_layer_dim, n_classes)
 
     def forward(self, x):
         """Implement ResNet1d forward propagation"""
@@ -196,7 +200,10 @@ class ResNet1d(nn.Module):
         x = x.view(x.size(0), -1)
 
         # Fully conected layer
-        x = self.lin(x)
+        # PVl mod 09/5/24, if n_class = 0, return features
+        if (self.n_classes > 0):
+            x = self.lin(x)
+            
         return x
 
 def Weighted_SSE(ages, pred_ages, weights):

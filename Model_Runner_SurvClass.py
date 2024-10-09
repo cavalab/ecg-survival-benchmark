@@ -70,6 +70,8 @@ import os
 os.environ['PYCOX_DATA_DIR'] = os.path.join(os.getcwd(),'Mandatory_PyCox_Dir') # next line requires this. it's a bad init call.
 
 
+from Model_Runner_Support import get_covariates
+
 from Model_Runner_Support import Load_Data
 from Model_Runner_Support import Clean_Data
 from Model_Runner_Support import Apply_Horizon
@@ -86,12 +88,7 @@ from Model_Runner_Support import Gen_AUROC_AUPRC
 from Model_Runner_Support import print_classifier_ROC
 from Model_Runner_Support import save_histogram
 
-from MODELS import InceptionTimeClassifier
-from MODELS import Ribeiro_Classifier
-from MODELS import FFClass
-from MODELS import LSTMClass
-from MODELS import TimesNetClass
-from MODELS import SpectCNNClass
+from MODELS import GenericModelSurvClass
 
 
 from MODELS.Support_Functions import Save_to_hdf5
@@ -159,12 +156,13 @@ def Run_Model(args):
         exit()
 
     Model_Type = args['Model_Name'].split('_')[0]
+    args['Model_Type'] = Model_Type
     
     if ('Train_Folder' not in args.keys()):
         print('Train_Folder not specified - cant train or pull models')
         exit()
     
-    # %% 3. Random Seeds should really be from args. Note: "load"ed models overwrite these!
+    # 3. Random Seeds should really be from args. Note: "load"ed models overwrite these!
     if ('Rand_Seed' in args.keys()):
         args['Rand_Seed'] = int(args['Rand_Seed'])
         
@@ -178,6 +176,9 @@ def Run_Model(args):
     torch.manual_seed(args['Rand_Seed'])
     torch.backends.cudnn.deterministic = True # make TRUE if you want reproducible results (slower)
     
+    # Y covariate indices get passed here
+    val_covariate_col_list, test_covariate_col_list = get_covariates(args)
+    
     # %% Process data: Load, Clean, Split
     Data, Train_Col_Names, Test_Col_Names = Load_Data(args)       # Data is a dict, so passed by reference from now on
     Clean_Data(Data, args)       # remove TTE<0 and NaN ECG
@@ -185,37 +186,31 @@ def Run_Model(args):
     Split_Data(Data)             # splits 'train' data 80/20 into train/val by PID
     DebugSubset_Data(Data, args) # If args['debug'] == True, limits Data[...] to 1k samples each of tr/val/test.
     
+    
+    # augment data with reshaped covariates
+    for key in ['train', 'valid']:
+        y_key = 'y_'+key
+        z_key = 'z_'+key # for covariates
+        Data[z_key] = Data[y_key][:,val_covariate_col_list]
+        
+    for key in ['test']:
+        y_key = 'y_'+key
+        z_key = 'z_'+key # for covariates
+        Data[z_key] = Data[y_key][:,test_covariate_col_list]
+        
+            
     # %% 9. set up trained model folders if they  don't exist
     set_up_train_folders(args)
 
     # %% 10. Select model, (maybe) load an existing model. ask for training (runs eval after training reqs met)
-    print('Model_Runner: Got to init. Total time elapsed: ' + str(time.time()-start_time) )
+    print('Model_Runner: Got to init. Total time elapsed: ' ,'{:.2f}'.format(time.time()-start_time) )
     
-    if (Model_Type == 'InceptionClass'):
-        asdf = InceptionTimeClassifier.InceptionTimeClassifier(args, Data)
-        
-    if (Model_Type == 'RibeiroClass'):
-        asdf = Ribeiro_Classifier.Ribeiro_Classifier(args, Data)
-        
-    # if (Model_Type == 'Resnet18'):
-    #     asdf = CV_Resnet18_Classifier_Flip.CV_Resnet18_Classifier_Flip(args, Data)
-        
-    if (Model_Type == 'FFClass'):
-        asdf = FFClass.FFClass(args, Data)
-        
-    if (Model_Type == 'LSTMClass'):
-        asdf = LSTMClass.LSTMClass(args, Data)
-        
-    if (Model_Type == 'TimesNetClass'):        
-        asdf = TimesNetClass.TimesNetClass(args, Data)
-        
-    if (Model_Type == 'SpectCNNClass'):
-        asdf = SpectCNNClass.SpectCNNClass(args, Data)
-        
-    print('Model_Runner:  Got to Train. Total time elapsed: ' + str(time.time()-start_time) )
+    asdf = GenericModelSurvClass.GenericModelSurvClass(args, Data)
+    
+    print('Model_Runner:  Got to Train. Total time elapsed: ' ,'{:.2f}'.format(time.time()-start_time) )
     if( ('Load' in args.keys())):
         asdf.Load(args['Load'])
-    asdf.Train()
+    asdf.train()
         
 
     if ('Test_Folder' in args.keys()):
@@ -223,7 +218,7 @@ def Run_Model(args):
     # Per new plan 8/29/24, classifier models save out the softmax'd outputs for class '1' (event happened) on VAL and TEST
     # Those will be stored along with data[y_] for VAL and TEST
     # ... so we can add covariates to the cox regressions (built on VAL) without engaging GPU
-        print('got to eval. Total Time elapsed: ' + str(time.time()-start_time))
+        print('got to eval. Total Time elapsed: ' ,'{:.2f}'.format(time.time()-start_time))
         
         # get model outputs for test, validation sets (unshuffled)
         if ('Eval_Dataloader' not in args.keys()): # This lets you evaluate the model on its validation set instead of test set
@@ -327,16 +322,28 @@ def Run_Model(args):
         
         
         # %% multimodal work
-        # # %% 20. Save out some more things 
-        # multim_path = os.path.join(temp_path, 'Multimodal_Out.csv')
-        # temp = np.vstack( (Data_Y_Backup['y_test'][:,0],test_outputs,test_correct_outputs,Data_Y_Backup['y_test'][:,3], Data_Y_Backup['y_test'][:,4] )  )
-        # temp = np.transpose(temp)
-        # headers = 'PID, test_outputs, test_correct_output, TTE, E'
-        # np.savetxt(multim_path, temp, header=headers, delimiter = ',')
+        # %% 20. Save out some more things maybe
         
-        # auroc_2, auprc_2, Chance_At_Age = get_AUROC_AUPRC(disc_y_t, disc_y_e, surv, [30/365], sample_time_points)
-        
-        
+        if ('Multimodal_Out' in args.keys()):
+            if (args['Multimodal_Out'] == 'True'):
+                multim_path = os.path.join(args['Model_Eval_Path'], 'Multimodal_Out.csv')
+                
+                # PID, TTE*, E* @ column inds [-3,-2,-1], respectively
+                temp = np.vstack( (Data['y_test'][:,-3],test_outputs,test_correct_outputs,Data['y_test'][:,-2], Data['y_test'][:,-1] )  )
+                temp = np.transpose(temp)
+                headers = 'PID, test_outputs, test_correct_output, TTE, E'
+                np.savetxt(multim_path, temp, header=headers, delimiter = ',')
+                
+                Gen_AUROC_AUPRC(disc_y_t, disc_y_e, surv, [30/365, 1, 2, 5, 10], sample_time_points, args)
+            
+                if ('Neg_One_Out' in args.keys()):
+                    neg_one_path = os.path.join(args['Model_Eval_Path'], 'Model_Features_Out.hdf5')
+                    neg_one_out = asdf.Get_Features_Out(Which_Dataloader = args['Eval_Dataloader'])
+                    
+                    Save_to_hdf5(neg_one_path, headers, 'MM_headers')
+                    Save_to_hdf5(neg_one_path, temp, 'MM_Out')
+                    Save_to_hdf5(neg_one_path, neg_one_out, 'neg_one_out')
+                    
         # # PID = Data_Y_Backup['y_test'][:,0]
         # # test_outputs # softmax
         # # test_correct_outputs # label passed

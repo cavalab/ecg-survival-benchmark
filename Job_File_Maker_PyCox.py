@@ -41,7 +41,7 @@ def String_List_Append(Str1, Str2):
     return Str1 + [Str2]
 
 # %% Function to build the non-arg part of the job file
-def Get_Global_String_List( time_h, time_m, GPU, mem, model_type, name_suffix_list = ['051624']):
+def Get_Global_String_List( time_h, time_m, GPU, mem, model_type, name_suffix_list = ['10022024','Cov','BCH']):
     # returns a list of strings for a partial job file corresponding to inputs.
     # time_h - int
     # time_m - int
@@ -161,21 +161,22 @@ time_h = 48 # hour # BCH - 6, Code15 - 15. Double for 'Any' GPU
 time_m = 00 # min
 
 GPU = 'Any' # Quadro_RTX or Titan_RTX or Tesla_K or Tesla_T or NVIDIA_A40 or or NVIDIA_A100 'Any' (Any is good for Eval) 
-mem = 333 # GB, must be int. usually 99 for Code15, or 333 for MIMIC-IV
+mem = 199 # GB, must be int. usually 99 for Code15, or 333 for MIMIC-IV
 
 # %% Set Sweep params
 
 # each element of args_list MUST begin with ' --' (including the space)
 
-Model_Type_List = ['TimesNetReg'] # RibeiroReg, InceptionTimeReg, LSTMReg, TimesNetReg
+Model_Type_List = ['ZeroNet'] # RibeiroReg, InceptionTimeReg, LSTMReg, TimesNetReg, SpectCNNReg
 for Model_Type in Model_Type_List:
     glob_args_list = [] # glob_args_list is a list of lists. if an appended list has more than one entry, generate job files per entry
 
-    folders = ['MIMICIV'] # ['BCH_ECG', 'Code15', 'MIMICIV']
+    folders = ['BCH_ECG'] # ['BCH_ECG', 'Code15', 'MIMICIV']
     glob_args_list.append([ ' --Test_Folder ' + k + ' --Train_Folder ' + k for k in folders ])
     
 
     PyCox_Mdls = ['CoxPH','LH','DeepHit','MTLR'] #Survival Models: 'LH', 'DeepHit', 'MTLR', 'CoxPH'
+    # PyCox_Mdls = ['DeepHit'] #Survival Models: 'LH', 'DeepHit', 'MTLR', 'CoxPH'
     glob_args_list.append([ ' --pycox_mdl ' + k for k in PyCox_Mdls ])
     
         
@@ -196,7 +197,7 @@ for Model_Type in Model_Type_List:
     
     glob_args_list.append([ ' --epoch_end 200'  ])
     
-    Early_Stops = ['25'] 
+    Early_Stops = ['20'] 
     glob_args_list.append([ ' --early_stop ' + k for k in Early_Stops ])
     
     glob_args_list.append([ ' --Validate_Every 1'  ])
@@ -211,6 +212,20 @@ for Model_Type in Model_Type_List:
     Optimizer = 'Adam'                                  # 'cocob' or 'Adam'
     glob_args_list.append([ ' --optimizer ' + Optimizer  ])         
     glob_args_list.append([ ' --Scheduler True'  ])
+    
+    
+    Cov_Arg_List = ['[2,7]'] # BCH
+    # Cov_Arg_List = ['[2,5]'] # Code-15
+    # Cov_Arg_List = ['[1,2]'] # MIMIC
+    # Cov_Arg_List = ['[1,2,6,8,10,12,14,16,18,20]'] # MIMIC demo + machine meas all no bool
+    glob_args_list.append([ ' --val_covariate_col_list ' + k + ' --test_covariate_col_list ' + k for k in Cov_Arg_List ])
+    
+    
+    glob_args_list.append([ ' --fusion_layers 3'  ])
+    glob_args_list.append([ ' --fusion_dim 128'  ])
+    
+    glob_args_list.append([ ' --cov_layers 3'  ])
+    glob_args_list.append([ ' --cov_dim 32'  ])
     
     # prep
     decompress_args_list(glob_args_list, Model_Type)

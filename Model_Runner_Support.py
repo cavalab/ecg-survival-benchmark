@@ -19,6 +19,21 @@ from sklearn.metrics import average_precision_score
 from MODELS.Support_Functions import Data_Split_Rand
 from MODELS.Support_Functions import Save_to_hdf5
 
+# %% Arg processing
+def get_covariates(args):
+    val_covariate_col_list = []
+    if ('val_covariate_col_list' in args.keys()):
+        val_covariate_col_list = [int(k) for k in args['val_covariate_col_list'][1:-1].split(',')]
+        
+    test_covariate_col_list = []
+    if ('test_covariate_col_list' in args.keys()):
+        test_covariate_col_list = [int(k) for k in args['test_covariate_col_list'][1:-1].split(',')]
+        
+    return val_covariate_col_list, test_covariate_col_list
+
+
+
+
 # %% Load Data
 def Load_Data(args):
     start_time = time.time()
@@ -35,6 +50,13 @@ def Load_Data(args):
         Test_Col_Names = [k.decode('UTF-8') for k in f['column_names'][()]]
         
     print('Model_Runner: Loaded Train and Test data. Data Load Time: ' + str(time.time()-start_time) )
+    
+    # check if PID is processed correctly
+    if (max(Data['y_train'][:,0]) > 16777217):
+        if (Data['y_train'].dtype == np.float32):
+            print('PID exceeds float32 limits!')
+            assert(Data['y_train'].dtype != np.float32)
+    
     return Data, Train_Col_Names, Test_Col_Names
 
 # %% Clean Data
@@ -188,23 +210,24 @@ def Split_Data(Data):
 # %% Debug Data subset - pick 1k elements of train/val/test
 def DebugSubset_Data(Data, args):
     
-    if args['debug'] == 'True':
-        debug = True
-        sub_len = 1000
-        if (debug):
-            print("Model_Runner: WARNING - DEBUG speedup! only using "+str(sub_len)+' elems of tr/val/test!')
-            
-            tr_inds = np.random.randint(0, Data['x_train'].shape[0], (sub_len))
-            va_inds = np.random.randint(0, Data['x_valid'].shape[0], (sub_len))
-            te_inds = np.random.randint(0, Data['x_test'].shape[0], (sub_len))
-            
-            Data['x_train'] = Data['x_train'][tr_inds,:]
-            Data['x_valid'] = Data['x_valid'][va_inds,:]
-            Data['x_test'] = Data['x_test'][te_inds,:]
-            
-            Data['y_train'] = Data['y_train'][tr_inds]
-            Data['y_valid'] = Data['y_valid'][va_inds]
-            Data['y_test'] = Data['y_test'][te_inds]
+    if('debug' in args.keys()):
+        if args['debug'] == 'True':
+            debug = True
+            sub_len = 1000
+            if (debug):
+                print("Model_Runner: WARNING - DEBUG speedup! only using "+str(sub_len)+' elems of tr/val/test!')
+                
+                tr_inds = np.random.randint(0, Data['x_train'].shape[0], (sub_len))
+                va_inds = np.random.randint(0, Data['x_valid'].shape[0], (sub_len))
+                te_inds = np.random.randint(0, Data['x_test'].shape[0], (sub_len))
+                
+                Data['x_train'] = Data['x_train'][tr_inds,:]
+                Data['x_valid'] = Data['x_valid'][va_inds,:]
+                Data['x_test'] = Data['x_test'][te_inds,:]
+                
+                Data['y_train'] = Data['y_train'][tr_inds]
+                Data['y_valid'] = Data['y_valid'][va_inds]
+                Data['y_test'] = Data['y_test'][te_inds]
             
 # %% Folders            
 

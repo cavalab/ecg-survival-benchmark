@@ -31,6 +31,9 @@ from MODELS.Ribeiro_Classifier import get_ribeiro_process_multi_image
 from MODELS.InceptionTimeClassifier import get_InceptionTime_model
 from MODELS.InceptionTimeClassifier import get_InceptionTime_process_multi_image
 
+from MODELS.ConstantNet import get_ConstantNet_model
+from MODELS.ConstantNet import get_ConstantNet_process_multi_image
+
 
 
 # %% Datasets, Samplers, and Collate functions
@@ -113,6 +116,10 @@ class GenericModelSurvClass(GenericModel):
         if (self.args['Model_Type'] == 'InceptionTime'):
             self.model = get_InceptionTime_model(self.args, n_in_channels) # get the ECG interpreting model
             self.Adjust_Many_Images = get_InceptionTime_process_multi_image() # pointer to function
+            
+        if (self.args['Model_Type'] == 'ZeroNet'):
+            self.model = get_ConstantNet_model(0) # get the ECG interpreting model
+            self.Adjust_Many_Images = get_ConstantNet_process_multi_image() # pointer to function
 
         
     def prep_dataloaders(self):
@@ -302,6 +309,43 @@ class GenericModelSurvClass(GenericModel):
             outputs, test_loss, correct_outputs = self.Run_NN(self.test_dataloader) # NOT shuffled
         return outputs, test_loss, correct_outputs
 
+    # %%  save out the outputs at the -1'st layer of the model
+    def Get_Features_Out(self, Which_Dataloader = 'Test'):
+        outputs = []
+        correct_outputs = [] 
+        if (Which_Dataloader == 'Train'):  
+            self.train_dataloader.batch_sampler.shuffle = False 
+            my_dataloader = self.train_dataloader
+        if (Which_Dataloader == 'Validation'):  
+            my_dataloader = self.val_dataloader
+        else:
+            my_dataloader = self.test_dataloader
+        
+        self.model.return_second_to_last_layer = True
+        for i, (imgs , labels, cov) in enumerate(my_dataloader):
+            imgs = imgs.to(self.device)
+            imgs = imgs.to(torch.float32) # convert to float32 AFTER putting on GPU
+            # imgs = Normalize(imgs, self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev) #already normalized
+            imgs = self.Adjust_Many_Images(imgs)
+            
+            labels = labels.to(self.device)
+            labels = labels.type(torch.float32) # again, convert type AFTER putting on GPU
+            
+            cov = cov.to(self.device)
+            cov = cov.to(torch.float32)
+            
+            with torch.no_grad():
+                model_out = self.model(imgs, cov)
+            outputs = outputs + model_out.to("cpu").detach().tolist()
+            correct_outputs = correct_outputs + labels.to("cpu").detach().tolist()
+                
+        # cleanup
+        if (Which_Dataloader == 'Train'):  
+            self.train_dataloader.batch_sampler.shuffle = True
+        self.model.return_second_to_last_layer = False
+        
+        return np.stack(outputs)
+        
 
 # %% Model Loading
     def Load(self, best_or_last):
