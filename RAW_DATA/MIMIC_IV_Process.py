@@ -2,6 +2,7 @@
 """
 Created on Fri May  3 13:33:00 2024
 
+@author: CH242985
 """
 
 import os
@@ -13,8 +14,8 @@ import pandas as pd
 import h5py
 import torch # to set manual seed
 from torch.utils.data import random_split
-import wfdb # wfdb?
 
+import wfdb # wfdb?
 
 data_dir = os.path.join(os.getcwd(), 'MIMIC IV') # adjust
 
