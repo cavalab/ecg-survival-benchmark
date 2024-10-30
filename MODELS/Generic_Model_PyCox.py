@@ -553,7 +553,50 @@ class Generic_Model_PyCox(GenericModel):
 
         self.Load_Random_State(Import_Dict)
 
-
+    # %%  save out the outputs at the -1'st layer of the model
+    def Get_Features_Out(self, Which_Dataloader = 'Test'):
+        outputs = []
+        correct_outputs = [] 
+        if (Which_Dataloader == 'Train'):  
+            self.train_dataloader.batch_sampler.shuffle = False 
+            my_dataloader = self.train_dataloader
+        if (Which_Dataloader == 'Validation'):  
+            my_dataloader = self.val_dataloader
+        else:
+            my_dataloader = self.test_dataloader
+            my_dataloader.dataset.Return_Toggle = 'XY'
+        
+        self.model.return_second_to_last_layer = True
+        for i, (a,b) in enumerate(my_dataloader):
+            
+            imgs = a[0]
+            cov = a[1]
+            labels = b[1]
+            
+            imgs = imgs.to(self.device)
+            imgs = imgs.to(torch.float32) # convert to float32 AFTER putting on GPU
+            # imgs = Normalize(imgs, self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev) #already normalized
+            imgs = self.Adjust_Many_Images(imgs)
+            
+            labels = labels.to(self.device)
+            labels = labels.type(torch.float32) # again, convert type AFTER putting on GPU
+            
+            cov = cov.to(self.device)
+            cov = cov.to(torch.float32)
+            
+            with torch.no_grad():
+                model_out = self.model(imgs, cov)
+            outputs = outputs + model_out.to("cpu").detach().tolist()
+            correct_outputs = correct_outputs + labels.to("cpu").detach().tolist()
+                
+        # cleanup
+        if (Which_Dataloader == 'Train'):  
+            self.train_dataloader.batch_sampler.shuffle = True
+        self.model.return_second_to_last_layer = False
+        
+        return np.stack(outputs)
+    
+    
 # %% Overwrite save
 def Save_NN_PyCox(epoch, model, path, best_performance_measure=9999999, optimizer=None, scheduler=None, NT=None, NM=None, NS=None, max_duration=None):
     # https://pytorch.org/tutorials/recipes/recipes/saving_and_loading_a_general_checkpoint.html
@@ -586,4 +629,5 @@ def Save_NN_PyCox(epoch, model, path, best_performance_measure=9999999, optimize
         Out_Dict['max_duration'] = max_duration
     
     torch.save(Out_Dict, path)
+    
     

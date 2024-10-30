@@ -201,7 +201,7 @@ class GenericModelSurvClass(GenericModel):
                 train_loss += loss.item()
                 loss.backward()
                 
-                # minibatch implem - from https://kozodoi.me/blog/20210219/gradient-accumulation
+                # gradient accumulation - from https://kozodoi.me/blog/20210219/gradient-accumulation
                 if  ( ((i + 1) % accumulation_iterations ==0) or (i+1) == len(self.train_dataloader)):
                     self.optimizer.step() 
                     self.model.zero_grad()  
