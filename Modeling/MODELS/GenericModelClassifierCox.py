@@ -23,7 +23,6 @@ from MODELS.Support_Functions import Get_Loss
 from MODELS.Support_Functions import Save_NN
 from MODELS.Support_Functions import Save_Train_Args
 
-
 # models
 from MODELS.Ribeiro_Classifier import get_ribeiro_model
 from MODELS.Ribeiro_Classifier import get_ribeiro_process_multi_image
@@ -68,7 +67,7 @@ def Custom_Collate(batch):
 
 
 # %%  ---------------- Start the model
-class GenericModelSurvClass(GenericModel):
+class GenericModelClassifierCox(GenericModel):
 
     def __init__(self, args, Data):
         
@@ -87,18 +86,15 @@ class GenericModelSurvClass(GenericModel):
         # 3. Prep Loss Params
         self.prep_classif_loss()
 
-            
         # 4. Grab ECG processing network 
         self.gen_ecg_model()
             
         # 5. wrap our network with the fusion modules before building optimizer/scheduler
         self.prep_fusion(out_classes = 2)
         
-
         # 6. Optimizer and scheduler
         self.prep_optimizer_and_scheduler()
         
-    
 # %% Init functions
     def gen_ecg_model(self):
         # figures out how to summon model, image adjustment functions
@@ -121,7 +117,6 @@ class GenericModelSurvClass(GenericModel):
             self.model = get_ConstantNet_model(0) # get the ECG interpreting model
             self.Adjust_Many_Images = get_ConstantNet_process_multi_image() # pointer to function
 
-        
     def prep_dataloaders(self):
         a = time.time()
         if 'x_train' in self.Data.keys():
@@ -137,8 +132,25 @@ class GenericModelSurvClass(GenericModel):
             self.test_dataloader = torch.utils.data.DataLoader (self.test_dataset,  batch_size = self.GPU_minibatch_limit, collate_fn=Custom_Collate, shuffle = False) #DO NOT SHUFFLE
         print('Generic_Model_SurvClass: prep_dataloaders T = ', '{:.2f}'.format(time.time()-a))
 
-
 # %% Training
+
+    # dataloader outputs get processed in several functions below: standardize.
+    def process_dataloader_output(self, imgs, labels, cov):
+        
+        imgs = imgs.to(self.device)
+        imgs = imgs.to(torch.float32) # convert to float32 AFTER putting on GPU
+        # imgs = Normalize(imgs, self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev) # frontloaded
+        imgs = self.Adjust_Many_Images(imgs) # adjust a batch of ECGs to fit the ECG model #sometimes we want a different shsape
+        
+        labels = labels.to(self.device)
+        labels = labels.to(torch.float32) # again, convert type AFTER putting on GPU
+        
+        cov = cov.to(self.device)
+        cov = cov.to(torch.float32)
+        
+        return imgs, labels, cov
+        
+
     def train(self):
         Best_Model = copy.deepcopy(self.model) # need to start with 'some' best model
         
@@ -178,24 +190,12 @@ class GenericModelSurvClass(GenericModel):
         # If more training requested, train
         for epoch in range(self.epoch_start, self.epoch_end):
             self.model.train()
-            epoch_start_time = time.time()
             
+            epoch_start_time = time.time()
             train_loss = 0
             for i, (imgs , labels, cov) in enumerate(self.train_dataloader):
-
-                imgs = imgs.to(self.device)
-                imgs = imgs.to(torch.float32) # convert to float32 AFTER putting on GPU
-                # imgs = Normalize(imgs, self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
-                imgs = self.Adjust_Many_Images(imgs) # adjust a batch of ECGs to fit the ECG model
-                
-                labels = labels.to(self.device)
-                labels = labels.to(torch.float32) # again, convert type AFTER putting on GPU
-                
-                cov = cov.to(self.device)
-                cov = cov.to(torch.float32)
-
+                imgs, labels, cov = self.process_dataloader_output(imgs, labels, cov)
                 model_out = self.model(imgs, cov)
-                
                 
                 loss = Get_Loss(model_out, labels, self.Loss_Params) 
                 train_loss += loss.item()
@@ -270,22 +270,11 @@ class GenericModelSurvClass(GenericModel):
         self.model.eval()
         
         tot_loss = 0
-        
         outputs = []
         correct_outputs = [] 
         
         for i, (imgs , labels, cov) in enumerate(my_dataloader):
-            imgs = imgs.to(self.device)
-            imgs = imgs.to(torch.float32) # convert to float32 AFTER putting on GPU
-            # imgs = Normalize(imgs, self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
-            imgs = self.Adjust_Many_Images(imgs)
-            
-            labels = labels.to(self.device)
-            labels = labels.type(torch.float32) # again, convert type AFTER putting on GPU
-            
-            cov = cov.to(self.device)
-            cov = cov.to(torch.float32)
-
+            imgs, labels, cov = self.process_dataloader_output(imgs, labels, cov)
             with torch.no_grad():
                 model_out = self.model(imgs, cov)
         
@@ -323,17 +312,7 @@ class GenericModelSurvClass(GenericModel):
         
         self.model.return_second_to_last_layer = True
         for i, (imgs , labels, cov) in enumerate(my_dataloader):
-            imgs = imgs.to(self.device)
-            imgs = imgs.to(torch.float32) # convert to float32 AFTER putting on GPU
-            # imgs = Normalize(imgs, self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev) #already normalized
-            imgs = self.Adjust_Many_Images(imgs)
-            
-            labels = labels.to(self.device)
-            labels = labels.type(torch.float32) # again, convert type AFTER putting on GPU
-            
-            cov = cov.to(self.device)
-            cov = cov.to(torch.float32)
-            
+            imgs, labels, cov = self.process_dataloader_output(imgs, labels, cov)
             with torch.no_grad():
                 model_out = self.model(imgs, cov)
             outputs = outputs + model_out.to("cpu").detach().tolist()

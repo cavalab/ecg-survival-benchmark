@@ -19,6 +19,8 @@ from Model_Runner_Support import DebugSubset_Data
 from Model_Runner_Support import set_up_train_folders
 from Model_Runner_Support import set_up_test_folders
 
+from Model_Runner_Support import provide_data_details
+
 # evaluation wrappers
 from Model_Runner_Support import Gen_KM_Bootstraps
 from Model_Runner_Support import Gen_Concordance_Brier_No_Bootstrap
@@ -128,6 +130,11 @@ def Run_Model(args):
     # %% Process data: Load, Clean, Split
     Data, Train_Col_Names, Test_Col_Names = Load_Data(args)       # Data is a dict, so passed by reference from now on
     Clean_Data(Data, args)       # remove TTE<0 and NaN ECG
+    
+    if ('provide_data_details' in args.keys()):
+        if (args['provide_data_details'] == 'True'):
+            provide_data_details(args, Data, Train_Col_Names, Test_Col_Names)
+    
     Apply_Horizon(Data, args)    # classifiers need to compact TTE and E into a single value, E*. Augments Data['y_'] for model train/runs without overwriting loaded information.
     Split_Data(Data)             # splits 'train' data 80/20 into train/val by PID
     DebugSubset_Data(Data, args) # If args['debug'] == True, limits Data[...] to 1k samples each of tr/val/test.
@@ -154,14 +161,10 @@ def Run_Model(args):
 
     # %% 10. Select model, (maybe) load an existing model. ask for training (runs eval after training reqs met)
     
-    
-    # This is where things change
-    
     # from https://xgboost.readthedocs.io/en/stable/get_started.html
     asdf = XGBClassifier(n_estimators=100, learning_rate=0.1, objective='binary:logistic')
     
-    
-    # do we need to normalize data first?
+    # do we need to normalize data first? yes
     # from https://xgboosting.com/xgboost-min-max-scaling-numerical-input-features/
     
     scaler = MinMaxScaler(feature_range=(-1, 1))
@@ -170,30 +173,14 @@ def Run_Model(args):
     Data['z_test'] = scaler.transform(Data['z_test'])
     
     asdf.fit(Data['z_train'], Data['y_train'][:,-1])
-    
-    
-    
-    # print('Model_Runner: Got to init. Total time elapsed: ' ,'{:.2f}'.format(time.time()-start_time) )
-    
-    # asdf = GenericModelSurvClass.GenericModelSurvClass(args, Data)
-    
-    # print('Model_Runner:  Got to Train. Total time elapsed: ' ,'{:.2f}'.format(time.time()-start_time) )
-    # if( ('Load' in args.keys())):
-    #     asdf.Load(args['Load'])
-    # asdf.train()
-        
 
-    if ('Test_Folder' in args.keys()):
     # %% 11. Generate and save out results   
-    # Per new plan 8/29/24, classifier models save out the softmax'd outputs for class '1' (event happened) on VAL and TEST
-    # Those will be stored along with data[y_] for VAL and TEST
-    # ... so we can add covariates to the cox regressions (built on VAL) without engaging GPU
-        print('got to eval. Total Time elapsed: ' ,'{:.2f}'.format(time.time()-start_time))
-        
+    print('got to eval. Total Time elapsed: ' ,'{:.2f}'.format(time.time()-start_time))
+    if ('Test_Folder' in args.keys()):
+    
         # get model outputs for test, validation sets (unshuffled)
         if ('Eval_Dataloader' not in args.keys()): # This lets you evaluate the model on its validation set instead of test set
             args['Eval_Dataloader'] = 'Test'
-            
         if args['Eval_Dataloader'] == 'Test':
             test_outputs =  asdf.predict_proba(Data['z_test'])[:,1]
             test_correct_outputs = Data['y_test'][:,-1] # E*, horizoned event, is at -1
@@ -207,8 +194,7 @@ def Run_Model(args):
         # get validation outputs anyway for Cox model fit
         val_outputs =  asdf.predict_proba(Data['z_valid'])[:,1]
         val_correct_outputs = Data['y_valid'][:,-1] # E*, horizoned event, is at -1
-            
-
+        
         # adjust output formats
         val_outputs  = np.squeeze(val_outputs)
         test_outputs = np.squeeze(test_outputs)
@@ -218,12 +204,10 @@ def Run_Model(args):
         # val_outputs = np.array([softmax(k)[1] for k in val_outputs])
         # test_outputs = np.array([softmax(k)[1] for k in test_outputs])
         
-        
         # --- From here, everything should go as before
         
         # Set up Folders
         set_up_test_folders(args)
-        
         
         # Save out smx val/test model outputs + the labels ( [PID, TTE*, E*] are last three cols, model was trained on TTE*,E*)
         # From this we can recreate Cox models later

@@ -34,37 +34,7 @@ Model_Runner:
         - Model Type is set by the first half (up to an underscore) of their name: --Model_Name Resnet18Class_[asfd1]
         - Trained models live in Trained_Models/[their training data folder], as passed in: --Train_Folder [folder]
         - Model_Runner MUST get the Train_Folder and Model_Name arguments to know which model to build or use
-        
-    - Model_Runner:
-        - Sets Model Name 
-        - Determines if training happens (requires --Train True AND --Train_Folder [folder])
-        - Sets a random seed if that was not passed
-        - If training, Loads training data. 
-            - Data is currently (12/4/23) assumed to be in:
-                - In os.path.join(os.getcwd(),'HDF5_DATA',args['Train_Folder'],'TRAIN_DATA','Train_Data.hdf5')
-                - With numpy parameters 'x' and 'y'
-        - If evaluating: (requires --Test_Folder [folder])
-            - Attempts to load from os.path.join(os.getcwd(),'HDF5_DATA',args['Test_Folder'],'TEST_DATA','Test_Data.hdf5')
-            - On failure:
-                - Checks for a passed TE_RATIO argument. By default, TR_RATIO = 80, VA_RATIO = 20.
-                    - generates a test set from a training/validation/test split of:
-                    - os.path.join(os.getcwd(),args['Test_Folder'],'TRAIN_DATA','Train_Data.hdf5')
-        - If a training set is present:
-            - Data is split randomly into Train/Test/Validate from TR_RATIO/TE_RATIO/VA_RATIO
-            - Splits prioritize allocations for Train/Test/Validate in that order (ceil, ceil, remainder) (If a class only has one sample, it is in training.)
-            - For classifiers, the split is performed per class
-            - Everything is stored in Data['x_train'], Data['x_valid'], Data['x_test'], and y-equivalents
-            
-        - Initalizes a model: model(args, Data)
-        - Runs model.load() if --Load [anything]
-        - Runs model.eval() if --Test_Folder [anything]
-        - Generates figures from eval, saves figure, eval params, and eval outputs
-        
-    - Other:
-        - Model training and evaluation are split intentionally
-        - Classifiers currently assume the lowest class number to be 0
-        - If you specify a non-default (0 or 1) column of train_y or test_y to use, that will add sub-folders to the path
-        
+
 
 main() parses command line inputs, then feeds a dict to run_model()
 Run_Model_via_String_Arr() parses arguments from an array of strings, then feeds a dict to run_model()
@@ -100,7 +70,7 @@ from MODELS.Support_Functions import Save_to_hdf5
 
 
 
-from MODELS import Generic_Model_PyCox
+from MODELS import GenericModelDeepSurvival
 
 import numpy as np
 import torch
@@ -198,18 +168,7 @@ def Run_Model(args):
     
     # %% 6. Select model, (maybe) load an existing model. ask for training (runs eval after training reqs met)
     print('Model_Runner:  Got to model init. Total time elapsed: ' ,'{:.2f}'.format(time.time()-start_time) )
-    asdf = Generic_Model_PyCox.Generic_Model_PyCox(args, Data)
-    
-    # if (Model_Type == 'InceptionTimeReg'):
-    #     asdf = InceptionTimeRegression_PyCox.InceptionTimeRegression_PyCox(args, Data)
-    # if (Model_Type == 'RibeiroReg'):
-    #     asdf = Ribeiro_Regression_PyCox.Ribeiro_Regression_PyCox(args, Data)
-    # if (Model_Type == 'LSTMReg'):
-    #     asdf = LSTMReg_PyCox.LSTMReg_PyCox(args, Data)
-    # if (Model_Type == 'TimesNetReg'):
-    #     asdf = TimesNetReg_PyCox.TimesNetReg_PyCox(args, Data)
-    # if (Model_Type == 'SpectCNNReg'):
-    #     asdf = SpectCNNReg_PyCox.SpectCNNReg_PyCox(args, Data)
+    asdf = GenericModelDeepSurvival.GenericModelDeepSurvival(args, Data)
       
     print('Model_Runner:  Got to Train. Total time elapsed: ' ,'{:.2f}'.format(time.time()-start_time) )
     if( ('Load' in args.keys())):
@@ -281,6 +240,30 @@ def Run_Model(args):
         
         print('Model_Runner: Finished evaluation. Total time elapsed: ' ,'{:.2f}'.format(time.time()-start_time) )
         
+        # %% 20. Save out some more things maybe
+        
+        if ('Multimodal_Out' in args.keys()):
+            if (args['Multimodal_Out'] == 'True'):
+                multim_path = os.path.join(args['Model_Eval_Path'], 'Multimodal_Out.csv')
+                
+                # PID, TTE*, E* @ column inds [-3,-2,-1], respectively
+                surv_target_index = np.argmin( abs(sample_time_points - 30/365)) # mark the 1 month surv time point
+                
+                # next line differs from _Survclass: Data['y_test'][:,-2], which is usually TTE*, gets discretized. 
+                temp = np.vstack( (Data['y_test'][:,-3],1-surv[:,surv_target_index],disc_y_e,Data['y_test'][:,int(args['y_col_test_time'])], Data['y_test'][:,-1] )  )
+                temp = np.transpose(temp)
+                headers = 'PID, test_outputs, test_correct_output, TTE, E'
+                np.savetxt(multim_path, temp, header=headers, delimiter = ',')
+                
+                Gen_AUROC_AUPRC(disc_y_t, disc_y_e, surv, [30/365, 1, 2, 5, 10], sample_time_points, args)
+            
+                if ('Neg_One_Out' in args.keys()):
+                    neg_one_path = os.path.join(args['Model_Eval_Path'], 'Model_Features_Out.hdf5')
+                    neg_one_out = asdf.Get_Features_Out(Which_Dataloader = args['Eval_Dataloader'])
+                    
+                    Save_to_hdf5(neg_one_path, headers, 'MM_headers')
+                    Save_to_hdf5(neg_one_path, temp, 'MM_Out')
+                    Save_to_hdf5(neg_one_path, neg_one_out, 'neg_one_out')
         
     #%% Test?
 if __name__ == '__main__':

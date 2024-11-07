@@ -144,9 +144,7 @@ class FusionModel(nn.Module):
 
     
 # %%
-    
 class GenericModel:
-    
     def __init__(self): # doesn't automatically init; generic_model_x should call/overwrite/extend the generic functions here
         pass
     
@@ -246,7 +244,6 @@ class GenericModel:
         self.Perf = []
         
     # %% Data pieces
-    
     def restructure_data(self):
         a = time.time()
         for key in ['x_train', 'x_valid', 'x_test']:
@@ -269,18 +266,15 @@ class GenericModel:
                 self.Data[key] = Normalize(torch.Tensor(self.Data[key]), self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
         print('GenericModel: normalize_data T = ', '{:.2f}'.format(time.time()-a))
         
-    
-
 # %% Network pieces
     # %% Fusion pieces
-    
     def prep_fusion(self, out_classes = 2):
         
         # Process Fusion args
         if ('fusion_layers' in self.args.keys()):
             fusion_layers = int(self.args['fusion_layers'])
         else:
-            fusion_layers = 0
+            fusion_layers = 0 # go direct to output
             
         if ('cov_layers' in self.args.keys()):
             cov_layers = int(self.args['cov_layers'])
@@ -330,22 +324,17 @@ class GenericModel:
             print('scheduler is not compatible with parameterfree optimizers')
             quit()
             
-            
     # %% 'Load' components
     def Load_Checkpoint(self, best_or_last):
         if (best_or_last == 'Last'):
             some_path = os.path.join(self.model_folder_path, 'Checkpoint.pt')
-            
         elif (best_or_last == 'Best'):
             some_path = os.path.join(self.model_folder_path, 'Best_Checkpoint.pt')
-            
         else:
             print('model load failed. Specify --Load Best or --Load Last')
             quit()
-        
         Import_Dict = torch.load(some_path) # load a checkpoint
         print('Loaded model from: '+ some_path)
-        
         return Import_Dict
     
     def Load_Random_State(self, Import_Dict):
@@ -368,7 +357,7 @@ class GenericModel:
             self.epoch_start = Import_Dict['epoch']+1
         else:
             print('Could not load last epoch count')
-        
+
         if ('best_performance_measure' in Import_Dict.keys()):
             self.Val_Best_Loss = Import_Dict['best_performance_measure']
         else:

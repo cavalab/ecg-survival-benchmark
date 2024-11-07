@@ -32,7 +32,92 @@ def get_covariates(args):
     return val_covariate_col_list, test_covariate_col_list
 
 
+def provide_data_details(args, Data, Train_Col_Names, Test_Col_Names):
+    from scipy.stats import ttest_ind
+    from scipy.stats import chi2_contingency
+    # after the data has been cleaned, we can look at some distributions
+    
+    # only get data details from the training set
+    if (Train_Col_Names !=Test_Col_Names):
+        return 0   
 
+    PID_index = 0 # PID is always at zero
+    event_index = int(args['y_col_train_event'])
+    tte_index = int(args['y_col_train_time'])
+
+    # find 'is_male' column ('is_male' in BCH, Code-15, 'Gender' in MIMIC)
+    for i,k in enumerate(Train_Col_Names):
+        if k == 'Gender' or k== 'is_male':
+            is_male_index=i
+            break
+    
+    # find 'age' column ('age' in BCH, Code-15, 'Age' in MIMIC)
+    for i,k in enumerate(Train_Col_Names):
+        if k == 'age' or k== 'Age':
+            age_index=i
+            break
+        
+    train_cases = Data['y_train']
+    test_cases = Data['y_test']
+    combined_cases = np.vstack((Data['y_train'], Data['y_test']))
+    
+    male_cases =   combined_cases[combined_cases[:,is_male_index] == 1]
+    female_cases = combined_cases[combined_cases[:,is_male_index] == 0]
+    
+    male_pos_cases = male_cases[male_cases[:,event_index]==1,:]
+    male_neg_cases = male_cases[male_cases[:,event_index]==0,:]
+    
+    female_pos_cases = female_cases[female_cases[:,event_index]==1,:]
+    female_neg_cases = female_cases[female_cases[:,event_index]==0,:]
+    
+    
+    pos_cases = combined_cases[combined_cases[:,event_index]==1]
+    neg_cases = combined_cases[combined_cases[:,event_index]==0]
+    
+    print('\n by ECG')
+    print('ECG_n ', len(train_cases)+len(test_cases))
+    print('ECG_n Pos', sum(train_cases[:,event_index]==1)  + sum(test_cases[:,event_index]==1) )
+    print('ECG_n Neg', sum(train_cases[:,event_index]==0)  + sum(test_cases[:,event_index]==0) )
+    print('Do these add up? ', (sum(train_cases[:,event_index]==1)  + sum(test_cases[:,event_index]==1) + sum(train_cases[:,event_index]==0)  + sum(test_cases[:,event_index]==0)  == len(train_cases)+len(test_cases)))
+    
+    print('\n by PID')
+    print('train PID unique ', len(np.unique(Data['y_train'][:,PID_index])))
+    print('test PID unique ', len(np.unique(Data['y_test'][:,PID_index])))
+    print('test+train PID unique ', len(np.unique(combined_cases[:,PID_index])))
+    print('Do these add up? ', len(np.unique(Data['y_test'][:,PID_index])) + len(np.unique(Data['y_train'][:,PID_index])) == len(np.unique(combined_cases[:,PID_index])))
+    
+    uniques,unique_ind = np.unique(combined_cases[:,PID_index], return_index=True)
+    print('PID pos', sum(combined_cases[unique_ind,event_index]==1))
+    print('PID neg', sum(combined_cases[unique_ind,event_index]==0))
+    print('Do these line up? ', sum(combined_cases[unique_ind,event_index]==1) + sum(combined_cases[unique_ind,event_index]==0) == len(np.unique(combined_cases[:,PID_index])))
+    
+    # age mean, stdev, by gender
+    print ('\n age (stdev)')
+    print('age ... all ', np.mean(combined_cases[:,age_index]), np.std(combined_cases[:,age_index]) )
+    print('age ... pos ', np.mean(pos_cases[:,age_index]), np.std(pos_cases[:,age_index]) )
+    print('age ... neg ', np.mean(neg_cases[:,age_index]), np.std(neg_cases[:,age_index]) )
+    print('unpared t test: age ~ pos/neg:')
+    print(ttest_ind (pos_cases[:,age_index],neg_cases[:,age_index]))
+    
+    # by sex,
+    print('\n F/M')
+    print('Num female cases, % of all',len(female_cases), len(female_cases) / (len(female_cases) + len(male_cases)))
+    print('Pos female cases, % of pos',len(female_pos_cases), len(female_pos_cases) / (len(female_pos_cases) + len(male_pos_cases)))
+    print('Neg female cases, % of neg',len(female_neg_cases), len(female_neg_cases) / (len(female_neg_cases) + len(male_neg_cases)))
+    
+    print('Num male cases, % of all',len(male_cases), len(male_cases) / (len(female_cases) + len(male_cases)))
+    print('Pos male cases, % of pos',len(male_pos_cases), len(male_pos_cases) / (len(female_pos_cases) + len(male_pos_cases)))
+    print('Neg male cases, % of neg',len(male_neg_cases), len(male_neg_cases) / (len(female_neg_cases) + len(male_neg_cases)))
+    print('chi square test on contingency table: gender ~ pos/neg:')
+    print(chi2_contingency( [[len(female_pos_cases), len(female_neg_cases)], [len(male_pos_cases), len(male_neg_cases)]]))
+    
+    # followup years
+    print('\n Followup')
+    print('followup all ', np.mean(combined_cases[:,tte_index]), np.std(combined_cases[:,tte_index]))
+    print('followup pos ', np.mean(pos_cases[:,tte_index]), np.std(pos_cases[:,tte_index]))
+    print('followup neg ', np.mean(neg_cases[:,tte_index]), np.std(neg_cases[:,tte_index]))
+    print('unpared t test: followup T ~ pos/neg:')
+    print(ttest_ind (pos_cases[:,tte_index],neg_cases[:,tte_index]))
 
 # %% Load Data
 def Load_Data(args):
@@ -75,7 +160,10 @@ def Clean_Data(Data, args):
             x_key = 'x' + key[1:]
             
             # mark negative TTE
-            neg_inds = np.where(Data[key][:,int(args['y_col_train_time'])] < 0)[0]
+            if (key == 'y_train'):
+                neg_inds = np.where(Data[key][:,int(args['y_col_train_time'])] < 0)[0]
+            elif (key == 'y_test'):
+                neg_inds = np.where(Data[key][:,int(args['y_col_test_time'])] < 0)[0]
             inds_to_del = neg_inds.tolist()
             
             # mark nan traces (5x faster than summing isnan over the whole array)

@@ -494,3 +494,169 @@ with open(Out_File_Path, 'w',newline='') as f:
 #     wr = csv.writer(f)
 #     wr.writerows(out_list)   
     
+# %% Stats on things like [does surv differ from class?]
+breakpoint()
+
+# does concordance differ for Code15 Surv vs Class?
+
+Model_Args_List[0].keys() # shows list of key options
+np.unique(np.array([Model_Args_List[k]['Model_Architecture'] for k in range(len(Model_Args_List))])) # shows unique entry options
+
+def sort_model_inds (inds):
+# func - sort models by survival case, architecture, then random seed, in that order (low to high)
+    ind_scores = []
+    for k in inds:
+        ind_score = 0
+        if (Model_Args_List[k]['pycox_mdl'] == 'CoxPH'):
+            ind_score += 100
+        if (Model_Args_List[k]['pycox_mdl'] == 'DeepHit'):
+            ind_score += 200
+        if (Model_Args_List[k]['pycox_mdl'] == 'LH'):
+            ind_score += 300
+        if (Model_Args_List[k]['pycox_mdl'] == 'MTLR'):
+            ind_score += 400
+        if (Model_Args_List[k]['pycox_mdl'] == 'No Entry'):
+            if (Model_Args_List[k]['horizon'] == '1.0'):    
+                ind_score += 500
+            if (Model_Args_List[k]['horizon'] == '2.0'):    
+                ind_score += 600
+            if (Model_Args_List[k]['horizon'] == '5.0'):    
+                ind_score += 700
+            if (Model_Args_List[k]['horizon'] == '10.0'):    
+                ind_score += 800
+                
+        if (Model_Args_List[k]['Model_Architecture'] == 'InceptionTime'):
+            ind_score += 10
+        if (Model_Args_List[k]['Model_Architecture'] == 'Ribeiro'):
+            ind_score += 20
+        
+        ind_score += Model_Args_List[k]['Rand_Seed'] - 10 # rand seed is 10-14
+        ind_scores.append(ind_score)
+        
+    new_order = np.argsort(np.array(ind_scores))
+    return [inds[k] for k in new_order]
+            
+# 1. load data matching specific cases (sort by survival case and then random seed)
+def Get_Data_RS_bulk(Measure='', RunFolder='', Cov_List = '', Surv = '', Model_Types = '',debug = False):
+    # returns T99 RS_Conc for models matching the above criteria
+    # input: Model_Args_List
+    # input: Model_Measures_List
+    # input: RunFolder - which folder the model must have been trained and tested on
+    # input: Cov_List - 'Code15' or 'MIMIC' or 'None'
+    # input: Surv - 'Surv', 'Class', or 'Any'
+    # input: Model_Types - 'Inception', 'Resnet', 'ECG' or 'Demographic'
+    
+    # which covariate list must the models match?
+    if Cov_List == 'MIMICIV':
+        Cov_Criteria = '[1,2]'
+    elif Cov_List == 'Code15':
+        Cov_Criteria = '[2,5]'
+    elif Cov_List == 'None':
+        Cov_Criteria = 'No Entry'
+        
+    if Surv == 'PyCox':
+        Surv_Criteria = ['CoxPH', 'DeepHit', 'LH', 'MTLR']
+    elif Surv == 'SurvClass':
+        Surv_Criteria = ['No Entry']
+    elif Surv == 'Any':
+        Surv_Criteria = ['CoxPH', 'DeepHit', 'LH', 'MTLR', 'No Entry']
+        
+    if Model_Types == 'ECG':
+        Model_Criteria = ['InceptionTime', 'Ribeiro']
+    elif Model_Types == 'Demographic':
+        Model_Criteria = ['XGB','ZeroNet']
+    elif Model_Types == 'InceptionTime':
+        Model_Criteria = ['InceptionTime']
+    elif Model_Types == 'Ribeiro':
+        Model_Criteria = ['Ribeiro']
+        
+    # ECG Demo Code15 Surv   
+    inds = []
+    for i,m in enumerate(Model_Args_List):
+        if (m['Train_Folder'] != RunFolder):
+            continue
+        if (m['Test_Folder'] != RunFolder):
+            continue
+        if (m['val_covariate_col_list'] != Cov_Criteria): # [2,5] for Code15, [1,2] for MIMIC
+            continue
+        if (m['Model_Type'] not in Model_Criteria): # inceptionTime and Ribeiro ok
+            continue
+        if (m['pycox_mdl'] not in  Surv_Criteria): # surv models only
+            continue
+        inds.append(i)
+    inds = sort_model_inds(inds)
+        
+    if (debug):
+        for i,k in enumerate(inds):
+            print(Model_Args_List[k])
+            
+    return Get_Data_RS(Model_Measures_List,inds,[Measure])
+
+def quickus(arr):
+    tmp1 = np.mean(arr)
+    tmp2 = np.percentile(arr, 2.5)
+    tmp3 = np.percentile(arr, 97.5)
+    print(tmp1, tmp2, tmp3)
+    # return (tmp1, tmp2, tmp3)
+
+# Code15 
+
+# Surv vs Class - can't do paired comparisons
+Measure = 'T99 RS_Conc'
+a = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'Code15', Cov_List='Code15', Surv='SurvClass', Model_Types='ECG', debug = True)
+b = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'Code15', Cov_List='None', Surv='SurvClass', Model_Types='ECG')
+c = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'Code15', Cov_List='Code15', Surv='SurvClass', Model_Types='Demographic')
+d = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'Code15', Cov_List='Code15', Surv='PyCox', Model_Types='ECG')
+e = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'Code15', Cov_List='None', Surv='PyCox', Model_Types='ECG')
+f = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'Code15', Cov_List='Code15', Surv='PyCox', Model_Types='Demographic')
+
+from scipy.stats import mannwhitneyu
+mannwhitneyu(a,d)
+mannwhitneyu(b,e)
+mannwhitneyu(c,f)
+
+from scipy.stats import pearsonr
+y = [1]*10+[2]*10+[5]*10+[10]*10
+pearsonr(a.squeeze(),np.array(y)) # survclass with demographics vs horizon
+pearsonr(b.squeeze(),np.array(y)) # survclass vs horizon
+
+
+quickus(b)
+
+
+# Ribeiro vs InceptionTime - CAN do paired comparisons ... if I sort everything somehow
+a = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'Code15', Cov_List='Code15', Surv='Any', Model_Types='InceptionTime', debug = True)
+b = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'Code15', Cov_List='None', Surv='Any', Model_Types='InceptionTime')
+c = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'Code15', Cov_List='Code15', Surv='Any', Model_Types='Demographic')
+d = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'Code15', Cov_List='Code15', Surv='Any', Model_Types='Ribeiro')
+e = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'Code15', Cov_List='None', Surv='Any', Model_Types='Ribeiro')
+f = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'Code15', Cov_List='Code15', Surv='Any', Model_Types='Demographic')
+    
+from scipy.stats import wilcoxon
+wilcoxon (a,d) # ecg + demo
+wilcoxon (b,e) # ecg 
+
+# MIMIC
+a = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'MIMICIV', Cov_List='MIMICIV', Surv='SurvClass', Model_Types='ECG')
+b = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'MIMICIV', Cov_List='None', Surv='SurvClass', Model_Types='ECG')
+c = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'MIMICIV', Cov_List='MIMICIV', Surv='SurvClass', Model_Types='Demographic')
+d = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'MIMICIV', Cov_List='MIMICIV', Surv='PyCox', Model_Types='ECG')
+e = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'MIMICIV', Cov_List='None', Surv='PyCox', Model_Types='ECG')
+f = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'MIMICIV', Cov_List='MIMICIV', Surv='PyCox', Model_Types='Demographic')
+
+mannwhitneyu(a,d)
+mannwhitneyu(b,e)
+mannwhitneyu(c,f)
+
+# Ribeiro vs InceptionTime - CAN do paired comparisons ... if I sort everything somehow
+a = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'MIMICIV', Cov_List='MIMICIV', Surv='Any', Model_Types='InceptionTime')
+b = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'MIMICIV', Cov_List='None', Surv='Any', Model_Types='InceptionTime')
+c = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'MIMICIV', Cov_List='MIMICIV', Surv='Any', Model_Types='Demographic', debug = True)
+d = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'MIMICIV', Cov_List='MIMICIV', Surv='Any', Model_Types='Ribeiro')
+e = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'MIMICIV', Cov_List='None', Surv='Any', Model_Types='Ribeiro')
+f = Get_Data_RS_bulk(Measure=Measure, RunFolder = 'MIMICIV', Cov_List='MIMICIV', Surv='Any', Model_Types='Demographic')
+  
+wilcoxon (a,d) # ecg + demo
+wilcoxon (b,e) # ecg       
+pearsonr(a.squeeze(),np.array(y)) # survclass with demographics vs horizon
+pearsonr(b.squeeze(),np.array(y)) # survclass vs horizon

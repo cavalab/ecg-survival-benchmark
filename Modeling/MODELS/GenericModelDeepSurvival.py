@@ -191,7 +191,6 @@ class Generic_Model_PyCox(GenericModel):
 
     def __init__(self, args, Data):
         
-        
         # 0. Process input arguments 
         self.process_args_PyCox(args)
         self.Data = Data
@@ -282,9 +281,7 @@ class Generic_Model_PyCox(GenericModel):
                 self.Data[key][:,-2], self.Data[key][:,-1] = self.labtrans.transform(self.Data[key][:,-2], self.Data[key][:,-1]) # TTE lives in [:,-2], Event lives in [:,-1]
         print('GenericModelPyCox: discretize_data T = ', '{:.2f}'.format(time.time()-a))
 
-# %% Overwrite Process_Data_To_Dataloaders from Generic_Model
-# This runs AFTER we have normalization and time discretization prepped from either init or load
-# The goal is to get everything ready for PyCox model training
+# %%
 # 1) Prep which functions get called per image
 # 2) Discretize or normalize Data
 # 3) Prep Datasets and DataLoaders
@@ -362,7 +359,6 @@ class Generic_Model_PyCox(GenericModel):
                     if (self.epoch_start > self.epoch_end):
                         print('Generic_Model_PyCox.Train(): Requested train epochs > current epochs trained. evaluating.')
                         self.epoch_start = self.epoch_end
-                        # breakpoint()
                 else:
                     print('Generic_Model_PyCox.Train(): FAILED to load best model! Eval may be compromised')
             else:
@@ -375,8 +371,6 @@ class Generic_Model_PyCox(GenericModel):
             epoch_start_time = time.time()
             pycox_log = self.pycox_mdl.fit_dataloader(self.train_dataloader, epochs=1, verbose=True, val_dataloader=self.val_dataloader) 
             epoch_end_time = time.time()
-            
-            # breakpoint()
             
             # get train, val loss
             temp = pycox_log.get_measures()
@@ -437,46 +431,19 @@ class Generic_Model_PyCox(GenericModel):
         self.pycox_mdl.net = self.model
         return train_loss
 
-# %% Model Loading
-        
-    # After we load a model, we might need to re-do discretization. Currently, this has no effect since we load the training data each time
-    # def Discretize_On_Load(self, Import_Dict):
-    #     if ('max_duration' in Import_Dict.keys()):
-    #         if (self.Num_Classes > 1): # If we're loading an LH/MTLR/DeepHit model, overwrite number of discretization time steps
-    #             self.num_durations = self.Num_Classes
-    #         self.max_duration = Import_Dict['max_duration']
-    #         self.labtrans = LogisticHazard.label_transform(self.num_durations)
-    #         self.labtrans.fit_transform(np.array([0,self.max_duration]), np.array([0,1])) 
-    #     else:
-    #         print('cant discretize data on load')
-    #         exit()
-            
-        # If we _did_ want to process a new test set without loading the training set, we'd need to normalize/discretize the data after loading an existing model:
-        # if (self.max_duration is not None):
-        #     if ( ('Train' not in self.args.keys()) or (self.args['Train'] == 'False') ):
-        #         self.Process_Data_To_Dataloaders()
-
 # %% Overwrite Run, include output discretization from continuous CoxPH model
     def Run_NN (self, my_dataloader):
 
+        # CoxPH: compute baseline hazards
         if (self.args['pycox_mdl'] == 'CoxPH'):
             # ugly, but necessary
-
-            # okay, so we're passing input,target
-            # input needs to be a tuple of tensors
-            
-            # don't actually store to any variables - can be expensive
-            # a = self.Adjust_Many_Images(self.Data['x_train'][:,0,:,:])
-            # b = torch.tensor(self.Data['z_train']).to(torch.float32)
-            # self.pycox_mdl.compute_baseline_hazards(input= (a,b), target=[self.Data['y_train'][:,-2],self.Data['y_train'][:,-1]],batch_size = self.GPU_minibatch_limit)
-            
             self.pycox_mdl.compute_baseline_hazards(input= (self.Adjust_Many_Images(self.Data['x_train']),torch.tensor(self.Data['z_train']).to(torch.float32)), target=[self.Data['y_train'][:,-2],self.Data['y_train'][:,-1]],batch_size = self.GPU_minibatch_limit)
             # note: because we use validation performance to pick the model, we can't build the baselines on validation while that is going on (that's like fitting on the test set)
            
         surv    = self.pycox_mdl.predict_surv(my_dataloader)
         surv_df = self.pycox_mdl.predict_surv_df(my_dataloader) # contains surv, also stores 'index' which is the time in years rather than discretized points
 
-        # for CoxPH you have to discretize time points manually
+        # CoxPH: discretize time points manually
         if (self.args['pycox_mdl'] == 'CoxPH'):
             # survival (x) is probability that event occurs AFTER the current time point (surv[:,0] != 1)
             # but this is evaluated at every single TTE.
@@ -507,12 +474,9 @@ class Generic_Model_PyCox(GenericModel):
             t = np.array([int(k) for k in my_dataloader.dataset.targets[:,0]])
             d = np.array([int(k) for k in my_dataloader.dataset.targets[:,1]])
             
-            
-        cuts = self.labtrans.cuts 
-
+        cuts = self.labtrans.cuts # discretization points
         return cuts, t, d, surv , surv_df
 
-# %% Overwrite test    
     # %% Test
     def Test(self, Which_Dataloader = 'Test'):
 
@@ -576,7 +540,7 @@ class Generic_Model_PyCox(GenericModel):
             imgs = imgs.to(self.device)
             imgs = imgs.to(torch.float32) # convert to float32 AFTER putting on GPU
             # imgs = Normalize(imgs, self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev) #already normalized
-            imgs = self.Adjust_Many_Images(imgs)
+            # imgs = self.Adjust_Many_Images(imgs) # done per image with dataloader
             
             labels = labels.to(self.device)
             labels = labels.type(torch.float32) # again, convert type AFTER putting on GPU
@@ -592,6 +556,8 @@ class Generic_Model_PyCox(GenericModel):
         # cleanup
         if (Which_Dataloader == 'Train'):  
             self.train_dataloader.batch_sampler.shuffle = True
+        elif (Which_Dataloader == 'Test'):
+            my_dataloader.dataset.Return_Toggle = 'X'
         self.model.return_second_to_last_layer = False
         
         return np.stack(outputs)
