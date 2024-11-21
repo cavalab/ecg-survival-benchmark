@@ -54,15 +54,15 @@ MIMIC-IV (300GB RAM, ~8 hours)
 
 ## Use Overview:
 
-Classifier-based survival models are built and evaluated through `Model_Runner_SurvClass.py`
+Classifier-based survival models are built and evaluated through `Model_Runner_Classifier_Cox.py`
 
-PyCox survival models are built and evaluated through `Model_Runner_PyCox.py`
+PyCox survival models are built and evaluated through `Model_Runner_Deep_Survival.py`
 
 To manually build/evaluate models, use `Model_Runner_Caller.py`, which is pre-set with minimal calls to train a model.
 
-To do this with job files, structure the args to Model_Runner_SurvClass/PyCox similarly to Model_Runner_Caller does it (more on this later).
+To do this with job files, structure the args to Model_Runner_Classifier_Cox/Deep_Survival similarly to how Model_Runner_Caller does it (more on this later).
 
-Once you have several trained models, you can summarize them to tables using `Summarize_Trained_Models.py`
+Once you have several trained models, you can summarize them to tables using `Analysis_Summarize_Trained_Models.py`
 This creates the Summary_Tables folder, which includes: 
 1. Trained_Model_Summary.csv (containing all training arguments, default arguments, and model metrics) 
 1. Trained_Model_Main_Results_Table.csv (AUROC / AUPRC / all-time Brier and Concordance, averaged over all random seeds) 
@@ -72,25 +72,26 @@ This creates the Summary_Tables folder, which includes:
 
 Kaplan-Meier and histogram Survival Functions can be made by adapting Gen_KM_Curves.py to run on a particular training folder
 
-We include Job_File_Maker_SurvClass and Job_File_Maker_PyCox - these generate job files in our institution's format, but can be adapted to yours.
+We include Job_File_Maker_Classifier_Cox and Job_File_Maker_Deep_Survival - these generate job files in our institution's format, but can be adapted to yours.
 To generate job files based on trained models, use Job_File_Maker_From_Summary.py after summarizing trained models with Summarize_Trained_Models.py
 Job_File_Maker_From_Summary.py can be adapted to add / remove / change model runner arguments (ex: switch the evaluation dataset)
-In our paper, models were trained with random seeds 10-14. Data was split with random seed 12345.
+In our paper, Test/Train Data was split with random seed 12345. Training data was then further split in to Train/Validation with random seeds 10-14. 
 
----
-Model_Runner_SurvClass/PyCox: Everything is interpreted via a series of string-string argument-value pairs. Arguments must begin with "--" and be separated by spaces. These are turned into a dictionary mapping arguments to values.
+## Code Structure:
 
-Model_Runner_SurvClass initializes a specific_model, which is a generic_model. Each script (Runner, then generic_model, then specific_model) interprets the arguments dictionary.
+Model_Runner_* loads data and splits it into ECG Data['x_train'], Data['x_test'], Data['x_valid'], and Label(y) and Covariate(z) equivalents. Then it more-or-less calls model.init(), model.load(), model.fit(), and model.eval(), then sets up output folders, evaluates the models, and saves plots, .csvs, and .hdf5s with results. All data is stored to RAM and moved around with the Data dictionary. (It would not be too difficult to adjust this to .hdf5 sample-by-sample loading to reduce RAM). Model_Runner_Support contains shared scripts.
 
-Model_Runner_PyCox initializes a specific_model, which is a generic_pycox_model, which is a generic_model. Each script (Runner, then generic_model, then generic_pycox_model, then specific_model) interprets the arguments dictionary. 
+When Model_Runner* is instructed to train a model (Epoch_End > 0), it will check to see if a model checkpoint already exists to continue training from that checkpoint. This loads the CUDA and CPU random seeds so proceeds deterministically. Training can be skipped by adding 'load' arguments ('--Load Best' or '--Load Last') and setting '--Epoch_End -1'
 
-This format allows flexibility in adding new model types, since e.g. managing training is done by a more general class.
-Models are evaluated after training, but a model can be evaluated without training by loading the highest-validation-metric model with "--Load Best" and skipping training with "--Epoch_End -1"
+The models are instances of GenericModelClassifierCox/DeepSurvival, which are themselves objects of class GenericModel. More generic functions (like wrapping an ECG-processing architecture with a 'fusion' module) are located in GenericModel, but more specific functions (like training PyCox models)would be in GenericModelDeepSurvival. Support_Functions contains additional shared scripts. Model_Runner_XGB is much more lightweight, and also prints data demographics (combining test/train).
 
-Model_Runner_SurvClass/PyCox loads data and splits it into ECG Data['x_train'], Data['x_test'], Data['x_valid'], and Label(y)-equivalents. Then it more-or-less calls model.init(), model.load() (if applicable), model.fit(), and model.eval(), then sets up output folders, evaluates the models, and saves plots, .csvs, and .hdf5s with results.
+Passing Arguments: Everything is interpreted via a series of string-string argument-value pairs. Arguments must begin with "--" and be separated by spaces. Model_Runner_* converts these to a string:string dictionary, 'args', mapping arguments to values that is passed throughout the code. If you want a new architecture to take a parameter as an argument, you can include it in the call and it will be accessible during architecture initialization.
 
-Since models are evaluated on-the-fly, a GPU is required for both training and evaluation.
+Trained models are stored in /Trained_Models, which separates models by training data source. Beyond that, models are identified by their name, which begins with the architecture (e.g. InceptionTime_1). Model evaluations are further stored in /Eval and also separated by test data source. e.g. /Trained_Models/InceptionTime_1/Eval/Code-15/ 
 
+A GPU is required for both model training and evaluation. We do save the model outputs, however, so metrics can be computed off-cluster, as we did for subgroup analysis. 
+
+Importantly this also means that /Trained_Models/ contains copies of the test data
 
 ## Example Job File:
 
@@ -105,6 +106,4 @@ We tried to make data processing flexible: inputs in the N-H (single-channel tim
 
 
 ## See Also
-
-[References here]
 
