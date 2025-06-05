@@ -49,20 +49,20 @@ Currently, all models reshape it into N-C-H-W
 import os
 os.environ['PYCOX_DATA_DIR'] = os.path.join(os.getcwd(),'Mandatory_PyCox_Dir')
 
-from Model_Runner_Support import get_covariates
+# from Model_Runner_Support import get_covariates
 
-from Model_Runner_Support import Load_Data
-from Model_Runner_Support import Clean_Data
-from Model_Runner_Support import Augment_Y
+from Model_Runner_Support import Load_Labels
+# from Model_Runner_Support import Clean_Data
+from Model_Runner_Support import Load_ECG_and_Cov
 from Model_Runner_Support import Split_Data
-from Model_Runner_Support import DebugSubset_Data
+# from Model_Runner_Support import DebugSubset_Data
 from Model_Runner_Support import set_up_train_folders
 from Model_Runner_Support import set_up_test_folders
 
 # evaluation wrappers
 from Model_Runner_Support import Gen_KM_Bootstraps
 from Model_Runner_Support import Gen_Concordance_Brier_No_Bootstrap
-from Model_Runner_Support import Gen_Concordance_Brier_PID_Bootstrap
+# from Model_Runner_Support import Gen_Concordance_Brier_PID_Bootstrap
 from Model_Runner_Support import Gen_AUROC_AUPRC
 from Model_Runner_Support import save_histogram
 
@@ -83,7 +83,10 @@ collections.Callable = collections.abc.Callable
 
 import argparse
 
-
+# %% Compatability - bring back older version of scipy simpson function
+import scipy
+from MODELS.Support_Functions import simps
+scipy.integrate.simps = simps
 
 # %% 
 def main(*args):
@@ -142,33 +145,21 @@ def Run_Model(args):
     torch.manual_seed(args['Rand_Seed'])
     torch.backends.cudnn.deterministic = True # make TRUE if you want reproducible results (slower)
     
-    # Y covariate indices get passed here
-    val_covariate_col_list, test_covariate_col_list = get_covariates(args)
-    
     # %% Process data: Load, Clean, Split
-    Data, Train_Col_Names, Test_Col_Names = Load_Data(args) # Data is a dict, so passed by reference from now on
-    Clean_Data(Data, args)       # remove TTE<0 and NaN ECG
-    Augment_Y(Data, args)        # Augments Data['y_'] with [PID, TTE, E] for model train/runs without overwriting loaded information.
-    Split_Data(Data)             # splits 'train' data 80/20 into train/val by PID
-    DebugSubset_Data(Data, args) # If args['debug'] == True, limits Data[...] to 1k samples each of tr/val/test.
-    
-    # augment data with reshaped covariates
-    for key in ['train', 'valid']:
-        y_key = 'y_'+key
-        z_key = 'z_'+key # for covariates
-        Data[z_key] = Data[y_key][:,val_covariate_col_list]
-        
-    for key in ['test']:
-        y_key = 'y_'+key
-        z_key = 'z_'+key # for covariates
-        Data[z_key] = Data[y_key][:,test_covariate_col_list]
+    train_df, test_df = Load_Labels(args)       # Data is a dict, is passed by reference
+    # Clean_Data(Data, args)       # remove TTE<0 and NaN ECG
+    # Apply_Horizon(train_df, test_df, args)    # classifiers need to compact TTE and E into a single value, E*. Augments Data['y_'] for model train/runs without overwriting loaded information.
+    train_df, valid_df = Split_Data(train_df)             # splits 'train' data 80/20 into train/val by PID
+    Data, train_df, valid_df, test_df = Load_ECG_and_Cov(train_df, valid_df, test_df, args)
+    # DebugSubset_Data(Data, train_df, test_df, args) # If args['debug'] == True, limits Data[...] to 1k samples each of tr/val/test.
     
     # %% 5. set up trained model folders if they  don't exist
+    
     set_up_train_folders(args)
     
     # %% 6. Select model, (maybe) load an existing model. ask for training (runs eval after training reqs met)
     print('Model_Runner:  Got to model init. Total time elapsed: ' ,'{:.2f}'.format(time.time()-start_time) )
-    asdf = GenericModelDeepSurvival.GenericModelDeepSurvival(args, Data)
+    asdf = GenericModelDeepSurvival.GenericModelDeepSurvival(args, Data, train_df, valid_df, test_df)
       
     print('Model_Runner:  Got to Train. Total time elapsed: ' ,'{:.2f}'.format(time.time()-start_time) )
     if( ('Load' in args.keys())):
@@ -180,7 +171,7 @@ def Run_Model(args):
     
     # %% Model Evaluation
     # To evaluate model we need: dicrete time points, discretized time to event, event 0/1, S(t) per time point
-    
+
     if ('Test_Folder' in args.keys()):
         
         print('Model_Runner:  got to model eval. Total Time elapsed: ' ,'{:.2f}'.format(time.time()-start_time))
@@ -211,10 +202,10 @@ def Run_Model(args):
         Save_to_hdf5(outputs_hdf5_path, sample_time_points, 'sample_time_points')
         Save_to_hdf5(outputs_hdf5_path, disc_y_t, 'disc_y_t') # when it really happened
         Save_to_hdf5(outputs_hdf5_path, disc_y_e, 'disc_y_e') # what really happened
-        Save_to_hdf5(outputs_hdf5_path, Data['y_test'], 'y_test')
+        Save_to_hdf5(outputs_hdf5_path, test_df['Age'], 'Age')
+        Save_to_hdf5(outputs_hdf5_path, test_df['Is_Male'], 'Is_Male')        
         Save_to_hdf5(outputs_hdf5_path, surv, 'surv')
-        Save_to_hdf5(outputs_hdf5_path, Test_Col_Names + ['PID', 'TTE*', 'E*'], 'Test_Col_Names')
-
+        
 
         # %% 16. evlauations
         
@@ -228,42 +219,56 @@ def Run_Model(args):
         # Gen_Concordance_Brier_No_Bootstrap(surv_df, disc_y_t, disc_y_e.astype(bool), time_points, sample_time_points, args)
         Gen_Concordance_Brier_No_Bootstrap(surv_df, disc_y_t, disc_y_e, time_points, sample_time_points, args)
         # bootstrap: 1 ECG per patient x 20
-        Gen_Concordance_Brier_PID_Bootstrap(Data, args, disc_y_t, disc_y_e, surv_df, sample_time_points, time_points)
+        # Gen_Concordance_Brier_PID_Bootstrap(Data, args, disc_y_t, disc_y_e, surv_df, sample_time_points, time_points)
         
         # AUROC and AUPRC
         time_points = [1,2,5,10] # 999 doesn't work for AUROC
         Gen_AUROC_AUPRC(disc_y_t, disc_y_e, surv, time_points, sample_time_points, args)
-        
         
         # histogram
         save_histogram(sample_time_points, disc_y_t, surv, args)
         
         print('Model_Runner: Finished evaluation. Total time elapsed: ' ,'{:.2f}'.format(time.time()-start_time) )
         
-        # %% 20. Save out some more things maybe
+        # %% 20. Save out some more things 
         
         if ('Multimodal_Out' in args.keys()):
             if (args['Multimodal_Out'] == 'True'):
-                multim_path = os.path.join(args['Model_Eval_Path'], 'Multimodal_Out.csv')
                 
-                # PID, TTE*, E* @ column inds [-3,-2,-1], respectively
-                surv_target_index = np.argmin( abs(sample_time_points - 30/365)) # mark the 1 month surv time point
-                
-                # next line differs from _Survclass: Data['y_test'][:,-2], which is usually TTE*, gets discretized. 
-                temp = np.vstack( (Data['y_test'][:,-3],1-surv[:,surv_target_index],disc_y_e,Data['y_test'][:,int(args['y_col_test_time'])], Data['y_test'][:,-1] )  )
-                temp = np.transpose(temp)
-                headers = 'PID, test_outputs, test_correct_output, TTE, E'
-                np.savetxt(multim_path, temp, header=headers, delimiter = ',')
-                
-                Gen_AUROC_AUPRC(disc_y_t, disc_y_e, surv, [30/365, 1, 2, 5, 10], sample_time_points, args)
-            
-                if ('Neg_One_Out' in args.keys()):
-                    neg_one_path = os.path.join(args['Model_Eval_Path'], 'Model_Features_Out.hdf5')
-                    neg_one_out = asdf.Get_Features_Out(Which_Dataloader = args['Eval_Dataloader'])
+                # Per Train, Validation, Test
+                for eval_key in ['Train', 'Validation', 'Test']:
                     
-                    Save_to_hdf5(neg_one_path, headers, 'MM_headers')
-                    Save_to_hdf5(neg_one_path, temp, 'MM_Out')
-                    Save_to_hdf5(neg_one_path, neg_one_out, 'neg_one_out')
+                    if (eval_key == 'Train'):
+                        y_key = 'y_train'
+                    elif (eval_key == 'Validation'):
+                        y_key = 'y_valid'
+                    elif (eval_key == 'Test'):
+                        y_key = 'y_test'
+                        
+                    # save the model's predictions at the 1 month mark
+                    
+                    multim_path = os.path.join(args['Model_Eval_Path'], 'Multimodal_Prediction_Out_'+eval_key+'.csv')
+                    
+                    # PID, TTE*, E* @ column inds [-3,-2,-1], respectively
+                    surv_target_index = np.argmin( abs(sample_time_points - 30/365)) # mark the 1 month surv time point
+                    
+                    # regenerate surv
+                    cuts, disc_y_t, disc_y_e, surv, surv_df = asdf.Test(Which_Dataloader = eval_key)
+                    
+                    # next line differs from _Survclass: Data['y_test'][:,-2], which is usually TTE*, gets discretized. 
+                    temp = np.vstack( (Data[y_key][:,-3],1-surv[:,surv_target_index],disc_y_e,Data[y_key][:,int(args['y_col_test_time'])], Data[y_key][:,-1], Data[y_key][:,5], Data[y_key][:,1], Data[y_key][:,2]  ))
+                    temp = np.transpose(temp)
+                    headers = 'PID, surv_1mo_outputs, disc_y_e, TTE, E, SID, Age, Is_Male'
+                    np.savetxt(multim_path, temp, header=headers, delimiter = ',')
+                    
+                
+                    if ('Neg_One_Out' in args.keys()):
+                        # also save out the features
+                        neg_one_path = os.path.join(args['Model_Eval_Path'], 'Model_Features_Out_'+eval_key+'.hdf5')
+                        neg_one_out = asdf.Get_Features_Out(Which_Dataloader = eval_key)
+                        Save_to_hdf5(neg_one_path, headers, 'MM_headers')
+                        Save_to_hdf5(neg_one_path, temp, 'MM_Out')
+                        Save_to_hdf5(neg_one_path, neg_one_out, 'neg_one_out')
         
     #%% Test?
 if __name__ == '__main__':

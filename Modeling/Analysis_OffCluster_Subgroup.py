@@ -22,6 +22,154 @@ import time
 
 from Model_Runner_Support import get_surv_briercordance
 
+# %% compatability for old sk-learn: import simps
+#taken directly from  from https://github.com/scipy/scipy/blob/v0.18.1/scipy/integrate/quadrature.py#L298
+def tupleset(t, i, value):
+    l = list(t)
+    l[i] = value
+    return tuple(l)
+
+def _basic_simps(y, start, stop, x, dx, axis):
+    nd = len(y.shape)
+    if start is None:
+        start = 0
+    step = 2
+    slice_all = (slice(None),)*nd
+    slice0 = tupleset(slice_all, axis, slice(start, stop, step))
+    slice1 = tupleset(slice_all, axis, slice(start+1, stop+1, step))
+    slice2 = tupleset(slice_all, axis, slice(start+2, stop+2, step))
+
+    if x is None:  # Even spaced Simpson's rule.
+        result = np.sum(dx/3.0 * (y[slice0]+4*y[slice1]+y[slice2]),
+                        axis=axis)
+    else:
+        # Account for possibly different spacings.
+        #    Simpson's rule changes a bit.
+        h = np.diff(x, axis=axis)
+        sl0 = tupleset(slice_all, axis, slice(start, stop, step))
+        sl1 = tupleset(slice_all, axis, slice(start+1, stop+1, step))
+        h0 = h[sl0]
+        h1 = h[sl1]
+        hsum = h0 + h1
+        hprod = h0 * h1
+        h0divh1 = h0 / h1
+        tmp = hsum/6.0 * (y[slice0]*(2-1.0/h0divh1) +
+                          y[slice1]*hsum*hsum/hprod +
+                          y[slice2]*(2-h0divh1))
+        result = np.sum(tmp, axis=axis)
+    return result
+
+def simps(y, x=None, dx=1, axis=-1, even='avg'):
+    """
+    Integrate y(x) using samples along the given axis and the composite
+    Simpson's rule.  If x is None, spacing of dx is assumed.
+
+    If there are an even number of samples, N, then there are an odd
+    number of intervals (N-1), but Simpson's rule requires an even number
+    of intervals.  The parameter 'even' controls how this is handled.
+
+    Parameters
+    ----------
+    y : array_like
+        Array to be integrated.
+    x : array_like, optional
+        If given, the points at which `y` is sampled.
+    dx : int, optional
+        Spacing of integration points along axis of `y`. Only used when
+        `x` is None. Default is 1.
+    axis : int, optional
+        Axis along which to integrate. Default is the last axis.
+    even : {'avg', 'first', 'str'}, optional
+        'avg' : Average two results:1) use the first N-2 intervals with
+                  a trapezoidal rule on the last interval and 2) use the last
+                  N-2 intervals with a trapezoidal rule on the first interval.
+
+        'first' : Use Simpson's rule for the first N-2 intervals with
+                a trapezoidal rule on the last interval.
+
+        'last' : Use Simpson's rule for the last N-2 intervals with a
+               trapezoidal rule on the first interval.
+
+    See Also
+    --------
+    quad: adaptive quadrature using QUADPACK
+    romberg: adaptive Romberg quadrature
+    quadrature: adaptive Gaussian quadrature
+    fixed_quad: fixed-order Gaussian quadrature
+    dblquad: double integrals
+    tplquad: triple integrals
+    romb: integrators for sampled data
+    cumtrapz: cumulative integration for sampled data
+    ode: ODE integrators
+    odeint: ODE integrators
+
+    Notes
+    -----
+    For an odd number of samples that are equally spaced the result is
+    exact if the function is a polynomial of order 3 or less.  If
+    the samples are not equally spaced, then the result is exact only
+    if the function is a polynomial of order 2 or less.
+
+    """
+    y = np.asarray(y)
+    nd = len(y.shape)
+    N = y.shape[axis]
+    last_dx = dx
+    first_dx = dx
+    returnshape = 0
+    if x is not None:
+        x = np.asarray(x)
+        if len(x.shape) == 1:
+            shapex = [1] * nd
+            shapex[axis] = x.shape[0]
+            saveshape = x.shape
+            returnshape = 1
+            x = x.reshape(tuple(shapex))
+        elif len(x.shape) != len(y.shape):
+            raise ValueError("If given, shape of x must be 1-d or the "
+                             "same as y.")
+        if x.shape[axis] != N:
+            raise ValueError("If given, length of x along axis must be the "
+                             "same as y.")
+    if N % 2 == 0:
+        val = 0.0
+        result = 0.0
+        slice1 = (slice(None),)*nd
+        slice2 = (slice(None),)*nd
+        if even not in ['avg', 'last', 'first']:
+            raise ValueError("Parameter 'even' must be "
+                             "'avg', 'last', or 'first'.")
+        # Compute using Simpson's rule on first intervals
+        if even in ['avg', 'first']:
+            slice1 = tupleset(slice1, axis, -1)
+            slice2 = tupleset(slice2, axis, -2)
+            if x is not None:
+                last_dx = x[slice1] - x[slice2]
+            val += 0.5*last_dx*(y[slice1]+y[slice2])
+            result = _basic_simps(y, 0, N-3, x, dx, axis)
+        # Compute using Simpson's rule on last set of intervals
+        if even in ['avg', 'last']:
+            slice1 = tupleset(slice1, axis, 0)
+            slice2 = tupleset(slice2, axis, 1)
+            if x is not None:
+                first_dx = x[tuple(slice2)] - x[tuple(slice1)]
+            val += 0.5*first_dx*(y[slice2]+y[slice1])
+            result += _basic_simps(y, 1, N-2, x, dx, axis)
+        if even == 'avg':
+            val /= 2.0
+            result /= 2.0
+        result = result + val
+    else:
+        result = _basic_simps(y, 0, N-2, x, dx, axis)
+    if returnshape:
+        x = x.reshape(saveshape)
+    return result
+
+# %% Compatability - bring back older version of scipy simpson function
+import scipy
+from MODELS.Support_Functions import simps
+scipy.integrate.simps = simps
+# %%
 # def get_surv_briercordance(disc_y_t, disc_y_e, surv_df, target_times, time_points):
 #     # disc_y_t - (N,) int numpy array of discretized times when event occurs
 #     # disc_y_e - (N,) int or bool numpy array of whether event occurs
@@ -115,15 +263,34 @@ for Train_Source in os.listdir(Trained_Models_Path): #/MIMICIV_Multimodal_Subset
                 with open(json_path) as f:
                     tmp = json.load(f)
                     
-                # ONLY EVALUATE INCEPTIONTIME DEEPHIT
+                # we only care about the top models with demographics.
                 if ('pycox_mdl' not in tmp.keys()): # PyCox_mdl
                     continue
-                if (tmp['pycox_mdl'] != 'DeepHit'):
+                if ('covariates' not in tmp.keys()): # with dem
                     continue
-                if (tmp['Model_Type']!='InceptionTime'):
-                    continue
-
+                if (len(tmp['covariates']) > 13): # and not machine measures
+                    continue 
                 
+                
+                if (Train_Source == 'BCH'):
+                    if (tmp['pycox_mdl'] != 'DeepHit'):
+                        continue
+                    if (tmp['Model_Type']!='Ribeiro'):
+                        continue
+                    
+                if (Train_Source == 'Code15'):
+                     if (tmp['pycox_mdl'] != 'DeepHit'):
+                         continue
+                     if (tmp['Model_Type']!='Ribeiro'):
+                         continue
+                     
+                if (Train_Source == 'MIMICIV'):
+                     if (tmp['pycox_mdl'] != 'DeepHit'):
+                         continue
+                     if (tmp['Model_Type']!='Ribeiro'):
+                         continue
+
+            
                 # store name and data folder
                 Model_Dict = {}
                 Model_Dict['Name'] = Model_Name                                 
@@ -132,10 +299,7 @@ for Train_Source in os.listdir(Trained_Models_Path): #/MIMICIV_Multimodal_Subset
                 Model_Dict['Train_Folder'] = Train_Source   
                 
                 # also store covariates to cluster models by
-                if ('test_covariate_col_list' in tmp.keys()):
-                    Model_Dict['cov'] = tmp['test_covariate_col_list']
-                else:
-                    Model_Dict['cov'] = 'None'
+                Model_Dict['cov'] = tmp['covariates']
 
                 
                 # Figure out type from pycox model and horizon
@@ -178,19 +342,9 @@ for Train_Source in os.listdir(Trained_Models_Path): #/MIMICIV_Multimodal_Subset
                     disc_y_e_bool = np.array(disc_y_e,dtype=bool)
                     sample_time_points = f['sample_time_points'][()]
                     
-                    
-                    # Now we need to to split the data per age bracket - this dependso n the dataset
-                    column_names = np.array(  [k.decode('UTF-8') for k in f['Test_Col_Names'][()]  ])
-                    
-                    y_test = f['y_test'][()]
-                    
-                    if ('MIMIC' in Eval_Data_Folder):
-                        Ages = y_test[:,np.where(column_names=='Age')].squeeze()
-                        Genders = y_test[:,np.where(column_names=='Gender')].squeeze()
-                    elif (('Code' in Eval_Data_Folder) or ('BCH' in Eval_Data_Folder)):
-                        Ages = y_test[:,np.where(column_names=='age')].squeeze()
-                        Genders = y_test[:,np.where(column_names=='is_male')].squeeze()
-                    
+                    Ages = f['Age'][()]
+                    Is_Male = f['Is_Male'][()]
+
                     Age_Brackets = [[0, 20], [20, 40], [40, 60], [60,999], [0, 60], [0,999]]
                     
                     # open with full concordance
@@ -202,11 +356,11 @@ for Train_Source in os.listdir(Trained_Models_Path): #/MIMICIV_Multimodal_Subset
                         Subgroups_Name_List.append(subgroup_name)
                     
                     for Age_Bracket in Age_Brackets:
-                        for gender in np.unique(Genders): # For both MIMIC and Code-15, '1' is 'male'
+                        for gender in np.unique(Is_Male): # For both MIMIC and Code-15, '1' is 'male'
                             
                             # find where gender and age match
                             a = time.time()
-                            cat_1 = np.where(Genders==gender)
+                            cat_1 = np.where(Is_Male==gender)
                             cat_2 = np.where(Ages>=Age_Bracket[0])
                             cat_3 = np.where(Ages<Age_Bracket[1])
                             
@@ -248,7 +402,7 @@ for Train_Source in os.listdir(Trained_Models_Path): #/MIMICIV_Multimodal_Subset
                             #     Subgroups_Name_List.append(subgroup_name)
 
                     
-            Model_Dict_List.append(Model_Dict)
+                Model_Dict_List.append(Model_Dict)
                 
 # %% okay, we have it sorted. kinda.
 # Now we cluster models by matching type, test folder, (train is out for now), and subgroup
@@ -295,11 +449,21 @@ def Get_med_25_75_percentile_per_col(Data):
     p75 = np.percentile(Data,75)
     out_list = [str(np.round(med,decimals=2)), "({:.2f}".format(p25) + ", {:.2f})".format(p75)]
     return out_list
+
+def Get_med_25_75_excel(Data):
+    # input: one dim array
+    # output: [median, 25-75th percentile] in str format.
+    med = np.median(Data)
+    p25 = np.percentile(Data,25)
+    p75 = np.percentile(Data,75)
+    out_list = [str(med), str(med - p25), str(p75 - med)]
+    return out_list
     
 subgroup_headers = []
 for k in Subgroups_Name_List:
     subgroup_headers = subgroup_headers + [k]
-    subgroup_headers = subgroup_headers + ['25-75']
+    subgroup_headers = subgroup_headers + ['25']
+    subgroup_headers = subgroup_headers + ['75']
 
 header_list = cluster_criteria + ['N'] + subgroup_headers
 output_list = [header_list]
@@ -309,7 +473,8 @@ for cluster_inds, cluster_name in zip(clusters, cluster_names):
     for subgroup in Subgroups_Name_List:
         
         measures = [ Model_Dict_List[ind][subgroup] for ind in cluster_inds ]
-        txt_out = Get_med_25_75_percentile_per_col(np.array(measures))
+        # txt_out = Get_med_25_75_percentile_per_col(np.array(measures))
+        txt_out = Get_med_25_75_excel(np.array(measures))
         
         cluster_txt_out = cluster_txt_out + txt_out
         # cluster_txt_out.append(txt_out)

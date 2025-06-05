@@ -70,19 +70,20 @@ import os
 os.environ['PYCOX_DATA_DIR'] = os.path.join(os.getcwd(),'Mandatory_PyCox_Dir') # Fixes a bug on importing PyCox
 
 
-from Model_Runner_Support import get_covariates
-from Model_Runner_Support import Load_Data
-from Model_Runner_Support import Clean_Data
+# from Model_Runner_Support import get_covariates
+from Model_Runner_Support import Load_Labels
 from Model_Runner_Support import Apply_Horizon
 from Model_Runner_Support import Split_Data
-from Model_Runner_Support import DebugSubset_Data
+from Model_Runner_Support import Load_ECG_and_Cov
+
+# from Model_Runner_Support import DebugSubset_Data
 from Model_Runner_Support import set_up_train_folders
 from Model_Runner_Support import set_up_test_folders
 
 # evaluation wrappers
 from Model_Runner_Support import Gen_KM_Bootstraps
 from Model_Runner_Support import Gen_Concordance_Brier_No_Bootstrap
-from Model_Runner_Support import Gen_Concordance_Brier_PID_Bootstrap
+# from Model_Runner_Support import Gen_Concordance_Brier_PID_Bootstrap
 from Model_Runner_Support import Gen_AUROC_AUPRC
 from Model_Runner_Support import print_classifier_ROC
 from Model_Runner_Support import save_histogram
@@ -112,6 +113,13 @@ import argparse
 # to see how the classifier did at its job
 from sklearn.metrics import roc_auc_score
 from sklearn.metrics import average_precision_score
+
+# %% Compatability - bring back older version of scipy simpson function
+import scipy
+from MODELS.Support_Functions import simps
+scipy.integrate.simps = simps
+
+
 
 # %% 
 def main(*args):
@@ -164,45 +172,30 @@ def Run_Model(args):
     torch.manual_seed(args['Rand_Seed'])
     torch.backends.cudnn.deterministic = True # make TRUE if you want reproducible results (slower)
     
-    # Y covariate indices get passed as args too
-    val_covariate_col_list, test_covariate_col_list = get_covariates(args)
-    
     if ('Eval_Dataloader' not in args.keys()): # This lets you evaluate the model on its validation set instead of test set
         args['Eval_Dataloader'] = 'Test'
     
     # %% Process data: Load, Clean, Split
-    Data, Train_Col_Names, Test_Col_Names = Load_Data(args)       # Data is a dict, is passed by reference
-    Clean_Data(Data, args)       # remove TTE<0 and NaN ECG
-    Apply_Horizon(Data, args)    # classifiers need to compact TTE and E into a single value, E*. Augments Data['y_'] for model train/runs without overwriting loaded information.
-    Split_Data(Data)             # splits 'train' data 80/20 into train/val by PID
-    DebugSubset_Data(Data, args) # If args['debug'] == True, limits Data[...] to 1k samples each of tr/val/test.
+    train_df, test_df = Load_Labels(args)       # Data is a dict, is passed by reference
+    # Clean_Data(Data, args)       # remove TTE<0 and NaN ECG
+    Apply_Horizon(train_df, test_df, args)    # classifiers need to compact TTE and E into a single value, E*. Augments Data['y_'] for model train/runs without overwriting loaded information.
+    train_df, valid_df = Split_Data(train_df)             # splits 'train' data 80/20 into train/val by PID
+    Data, train_df, valid_df, test_df = Load_ECG_and_Cov(train_df, valid_df, test_df, args)
+    # DebugSubset_Data(Data, train_df, test_df, args) # If args['debug'] == True, limits Data[...] to 1k samples each of tr/val/test.
     
-    # augment data with reshaped covariates
-    for key in ['train', 'valid']:
-        y_key = 'y_'+key
-        z_key = 'z_'+key # for covariates
-        Data[z_key] = Data[y_key][:,val_covariate_col_list]
-        
-    for key in ['test']:
-        y_key = 'y_'+key
-        z_key = 'z_'+key # for covariates
-        Data[z_key] = Data[y_key][:,test_covariate_col_list]
-        
-            
     # %% 9. set up model folders if they  don't exist
     set_up_train_folders(args)
 
     # %% 10. Select model, (maybe) load an existing model. ask for training (runs eval after training reqs met)
     print('Model_Runner: Got to init. Total time elapsed: ' ,'{:.2f}'.format(time.time()-start_time) )
     
-    my_model = GenericModelClassifierCox.GenericModelClassifierCox(args, Data)
+    my_model = GenericModelClassifierCox.GenericModelClassifierCox(args, Data, train_df, valid_df, test_df)
     
     print('Model_Runner:  Got to Train. Total time elapsed: ' ,'{:.2f}'.format(time.time()-start_time) )
     if( ('Load' in args.keys())):
         my_model.Load(args['Load'])
     my_model.train()
         
-
     # %% 11. Generate and save out results
     print('got to eval. Total Time elapsed: ' ,'{:.2f}'.format(time.time()-start_time))
     if ('Test_Folder' in args.keys()):
@@ -227,8 +220,11 @@ def Run_Model(args):
         tmp = os.path.join(args['Model_Eval_Path'], 'Classif_Outputs_and_Labels.hdf5')
         Save_to_hdf5(tmp, val_outputs, 'val_outputs')
         Save_to_hdf5(tmp, test_outputs, 'test_outputs')
-        Save_to_hdf5(tmp, Data['y_valid'], 'y_valid')
-        Save_to_hdf5(tmp, Data['y_test'], 'y_test')
+        Save_to_hdf5(tmp, valid_df['E*'], 'valid_E*')
+        Save_to_hdf5(tmp, valid_df['TTE*'], 'valid_TTE*')
+        Save_to_hdf5(tmp, test_df['E*'], 'test_E*')
+        Save_to_hdf5(tmp, test_df['TTE*'], 'test_TTE*')
+        
         
         # %% 13. Run Cox models
         # 1. Fit a Cox model on the VALIDATION set, evaluate on TEST set
@@ -239,25 +235,26 @@ def Run_Model(args):
 
         # build CoxPH curves on validation data
         zxcv = CoxPHSurvivalAnalysis() 
-        a = Data['y_valid'][:,[int(args['y_col_train_event']) ]].astype(bool)   
-        b = Data['y_valid'][:,[int(args['y_col_train_time']) ]]                 
-        tmp = np.array([ (a[k],b[k][0]) for k in range(a.shape[0]) ], dtype = [('event',bool),('time',float)] )
+        a = valid_df['Mort_Event'].to_numpy().astype(bool) # Event as bool
+        b = valid_df['Mort_TTE'].to_numpy()
+              
+        tmp = np.array([ (a[k],b[k]) for k in range(a.shape[0]) ], dtype = [('event',bool),('time',float)] )
         zxcv.fit(np.expand_dims(val_outputs,-1), tmp   )
         
         # prep evaluation data - be sure to use actual time/event, not horizon
         if (args['Eval_Dataloader'] == 'Train'):
-            disc_y_e = Data['y_train'][:,[int(args['y_col_train_event']) ]].astype(bool) # prep event
-            disc_y_t = Data['y_train'][:,[int(args['y_col_train_time']) ]] # prep time
+            disc_y_e = train_df['Mort_Event'].to_numpy().astype(bool) # Event as bool
+            disc_y_t = train_df['Mort_TTE'].to_numpy()
         elif (args['Eval_Dataloader'] == 'Validation'):
-            disc_y_e = Data['y_valid'][:,[int(args['y_col_train_event']) ]].astype(bool) # prep event
-            disc_y_t = Data['y_valid'][:,[int(args['y_col_train_time']) ]] # prep time
+            disc_y_e = valid_df['Mort_Event'].to_numpy().astype(bool) # Event as bool
+            disc_y_t = valid_df['Mort_TTE'].to_numpy()
         else:
-            disc_y_e = Data['y_test'][:,[int(args['y_col_test_event']) ]].astype(bool) # prep event
-            disc_y_t = Data['y_test'][:,[int(args['y_col_test_time']) ]] # prep time
+            disc_y_e = test_df['Mort_Event'].to_numpy().astype(bool) # Event as bool
+            disc_y_t = test_df['Mort_TTE'].to_numpy()
     
         # %% 14. Match PyCox analyses
         # sample survival functions at a set of times (to compare to direct survival models)
-        upper_time_lim = max( b )[0] # the direct survival models don't predict beyond the validation end time
+        upper_time_lim = max( b ) # the direct survival models don't predict beyond the validation end time
         sample_time_points = np.linspace(0, upper_time_lim, 100).squeeze()
         
         surv_funcs = zxcv.predict_survival_function(np.expand_dims(test_outputs,-1))
@@ -273,9 +270,10 @@ def Run_Model(args):
         Save_to_hdf5(hdf5_path, sample_time_points, 'sample_time_points')
         Save_to_hdf5(hdf5_path, disc_y_e, 'disc_y_e') # what really happened
         Save_to_hdf5(hdf5_path, disc_y_t, 'disc_y_t') # when it really happened, discretized
-        Save_to_hdf5(hdf5_path, Data['y_test'], 'y_test')
+        Save_to_hdf5(hdf5_path, test_df['E*'].to_numpy(), 'Test E*')
+        Save_to_hdf5(hdf5_path, test_df['Age'], 'Age')
+        Save_to_hdf5(hdf5_path, test_df['Is_Male'], 'Is_Male')
         Save_to_hdf5(hdf5_path, surv, 'surv')
-        Save_to_hdf5(hdf5_path, Test_Col_Names + ['PID', 'TTE*', 'E*'], 'Test_Col_Names')
 
         print('Model_Runner: Generated survival curves. Total time elapsed: ' + str(time.time()-start_time) )
         
@@ -288,8 +286,9 @@ def Run_Model(args):
         time_points = [1,2,5,10,999]
         # across all ECG
         Gen_Concordance_Brier_No_Bootstrap(surv_df, disc_y_t, disc_y_e, time_points, sample_time_points, args)
+        
         # bootstrap: 1 ECG per patient x 20
-        Gen_Concordance_Brier_PID_Bootstrap(Data, args, disc_y_t, disc_y_e, surv_df, sample_time_points, time_points)
+        # Gen_Concordance_Brier_PID_Bootstrap(Data, args, disc_y_t, disc_y_e, surv_df, sample_time_points, time_points)
         
         # AUROC and AUPRC
         time_points = [1,2,5,10] # 999 doesn't work for AUROC
@@ -303,66 +302,38 @@ def Run_Model(args):
         
         
         # %% For downstream work
-        # %% Maybe save out 1-month performance and/or model features
+        # %% 20. Save out some more things 
         
         if ('Multimodal_Out' in args.keys()):
             if (args['Multimodal_Out'] == 'True'):
-                multim_path = os.path.join(args['Model_Eval_Path'], 'Multimodal_Out.csv')
+
                 
+                if (args['Eval_Dataloader'] == 'Test'):
+                    eval_key = 'y_test'
+                # save the model's predictions at the 1 month mark
+                
+                
+                multim_path = os.path.join(args['Model_Eval_Path'], 'Multimodal_Prediction_Out_'+eval_key+'.csv')
+
                 # PID, TTE*, E* @ column inds [-3,-2,-1], respectively
-                temp = np.vstack( (Data['y_test'][:,-3],test_outputs,test_correct_outputs,Data['y_test'][:,-2], Data['y_test'][:,-1] )  )
+                surv_target_index = np.argmin( abs(sample_time_points - 30/365)) # mark the 1 month surv time point
+
+                # next line differs from _Survclass: Data['y_test'][:,-2], which is usually TTE*, gets discretized. 
+                temp = np.vstack( (Data[eval_key][:,-3],1-surv[:,surv_target_index],disc_y_e,Data[eval_key][:,int(args['y_col_test_time'])], Data[eval_key][:,-1], Data[eval_key][:,5], Data[eval_key][:,1], Data[eval_key][:,2], test_outputs))
                 temp = np.transpose(temp)
-                headers = 'PID, test_outputs, test_correct_output, TTE, E'
+                headers = 'PID, surv_1month_output, E, TTE, E*, SID, Age, Is_Male, classif_outputs'
                 np.savetxt(multim_path, temp, header=headers, delimiter = ',')
                 
-                Gen_AUROC_AUPRC(disc_y_t, disc_y_e, surv, [30/365, 1, 2, 5, 10], sample_time_points, args)
             
                 if ('Neg_One_Out' in args.keys()):
-                    neg_one_path = os.path.join(args['Model_Eval_Path'], 'Model_Features_Out.hdf5')
-                    neg_one_out = my_model.Get_Features_Out(Which_Dataloader = args['Eval_Dataloader'])
-                    
+                    # also save out the features
+                    neg_one_path = os.path.join(args['Model_Eval_Path'], 'Model_Features_Out_'+eval_key+'.hdf5')
+                    neg_one_out = my_model.Get_Features_Out(Which_Dataloader = eval_key)
                     Save_to_hdf5(neg_one_path, headers, 'MM_headers')
                     Save_to_hdf5(neg_one_path, temp, 'MM_Out')
                     Save_to_hdf5(neg_one_path, neg_one_out, 'neg_one_out')
                     
-        # # PID = Data_Y_Backup['y_test'][:,0]
-        # # test_outputs # softmax
-        # # test_correct_outputs # label passed
-        # # TTE = Data_Y_Backup['y_test'][:,3]
-        # # TTE = Data_Y_Backup['y_test'][:,4]
-        
-        # # %%21. Save out some more details
-        
-        # # 1. What is distribution of ECG count per PID in last T time?
-        # x = 0.05*np.arange(21)
-        # save_out = [x]
-        
-        # for time_lim in [1/52,1/12,1,999]:
-        #     subset = Data_Y_Backup['y_train'][np.where(Data_Y_Backup['y_train'][:,3] <= time_lim)[0],:]
-        #     unique_PID = np.unique(subset[:,0])
-        #     counts = [np.where(subset[:,0] == k)[0].shape[0] for k in unique_PID]
-        #     event = [Data_Y_Backup['y_train'][np.where(subset == k)[0][0],4] for k in unique_PID  ]
-        #     event = np.array(event).astype(int)
-        #     counts = np.array(counts).astype(int)
-            
-        #     y1 = np.quantile(counts[np.where(event==1)],x)
-        #     y2 = np.quantile(counts[np.where(event==0)],x)
-        #     save_out.append(y1)
-        #     save_out.append(y2)
-            
-        #     plt.figure()
-        #     plt.scatter(x*100,y2)
-        #     plt.scatter(x*100,y1)
-        #     plt.legend(['event=0 med '+str(np.median(y2))+' u '+'{0:.2f}'.format(np.mean(y2)),'event=1 med '+str(np.median(y1)) + ' u '+'{0:.2f}'.format(np.mean(y1))])
-        #     plt.xlabel('percentile')
-        #     plt.ylabel('count')
-        #     plt.title('count per PID | TTE < '+str(time_lim))
-            
-        # characteristics_path = os.path.join(temp_path, 'Train_Characteristics.csv')
-        # headers = 'percentile, 1-wk event 1, 1-wk event 0, 1-mo event 1, 1-mo event 0,1-yr event 1, 1-yr event 0, all-t event 1, all-t event 0'
-        # temp = np.array(save_out).transpose()
-        # np.savetxt(characteristics_path, temp, header=headers, delimiter = ',')
-        
+    
     #%% Test?
 if __name__ == '__main__':
    main()

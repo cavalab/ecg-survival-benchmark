@@ -33,21 +33,30 @@ from MODELS.InceptionTimeClassifier import get_InceptionTime_process_multi_image
 from MODELS.ConstantNet import get_ConstantNet_model
 from MODELS.ConstantNet import get_ConstantNet_process_multi_image
 
+from MODELS.ECGTransForm import get_Transformer_Model
+from MODELS.ECGTransForm import get_Transformer_process_multi_image
 
 
 # %% Datasets, Samplers, and Collate functions
 class Custom_Dataset(torch.utils.data.Dataset):
-    def __init__(self, data, more_data, targets):
-        self.data = data
-        self.more_data = torch.tensor(more_data)
+    def __init__(self, ECG, Covariates, targets):
+        self.data = ECG
         self.targets = targets
-        # self.ones = torch.ones(1,4096,1)
         
+        # sometimes Covariates is an empty list
+        if (len(Covariates) > 0):
+            self.more_data = torch.tensor(Covariates)
+            self.has_covariates = True
+        else:
+            self.has_covariates = False
+    
     def __getitem__(self, index):
         x = self.data[index] # if you ever modify this value, torch.clone it first (else permanent)        
-        y = self.targets[index]        
-        z = self.more_data[index]
-        # out_x = torch.concat((x, self.ones*z),dim=2) # 200us (240 without preallocating ones)
+        y = self.targets[index]     
+        if (self.has_covariates):
+            z = self.more_data[index]
+        else:
+            z = []
         return x, y, z
     
     def __len__(self):
@@ -57,7 +66,13 @@ def Custom_Collate(batch):
     # here we return ecg, cov, and correct_label
     ecg_out = torch.stack([k[0] for k in batch]) # 32 x 1 x 4096 x 12
     event_label = torch.tensor(np.array([k[1] for k in batch] ))
-    cov = torch.stack([k[2] for k in batch])
+    
+    if (len(batch[0][2]) > 0): # if have covariates, stack them
+        cov = torch.stack([k[2] for k in batch])
+    else:
+        cov = torch.tensor([])
+    
+    
     # if (len(batch[0][2]) > 0):
     #     cov = torch.stack([k[2] for k in batch],axis=0 ) # 32 x 2.  # we want to expand these to 32 x 4096 x 2
     #     cov = cov.unsqueeze(1).unsqueeze(1)
@@ -69,11 +84,16 @@ def Custom_Collate(batch):
 # %%  ---------------- Start the model
 class GenericModelClassifierCox(GenericModel):
 
-    def __init__(self, args, Data):
+    def __init__(self, args, Data, train_df, valid_df, test_df):
+        
+        # -1. store pointers to things
+        self.Data = Data
+        self.train_df = train_df
+        self.valid_df = valid_df
+        self.test_df = test_df
         
         # 0. Process input arguments 
         self.Process_Args(args)
-        self.Data = Data
         
         # 1. Adjust data for this model
         self.restructure_data()
@@ -114,21 +134,25 @@ class GenericModelClassifierCox(GenericModel):
             self.Adjust_Many_Images = get_InceptionTime_process_multi_image() # pointer to function
             
         if (self.args['Model_Type'] == 'ZeroNet'):
-            self.model = get_ConstantNet_model(0) # get the ECG interpreting model
+            self.model = get_ConstantNet_model(0.0) # get the ECG interpreting model
             self.Adjust_Many_Images = get_ConstantNet_process_multi_image() # pointer to function
+            
+        if (self.args['Model_Type'] == 'ECGTransForm'):
+            self.model = get_Transformer_Model(self.args, n_in_channels) # get the ECG interpreting model
+            self.Adjust_Many_Images = get_Transformer_process_multi_image() # pointer to function
 
     def prep_dataloaders(self):
         a = time.time()
-        if 'x_train' in self.Data.keys():
-            self.train_dataset = Custom_Dataset( self.Data['x_train'] , self.Data['z_train'], self.Data['y_train'][:,-1]) # modified event, e*, lives in -1
+        if 'ECG_train' in self.Data.keys():
+            self.train_dataset = Custom_Dataset( self.Data['ECG_train'] , self.Data['Cov_train'], self.train_df['E*'].to_numpy()) # modified event, e*, lives in -1
             self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset, batch_size = self.GPU_minibatch_limit, collate_fn=Custom_Collate, shuffle = True) # weighted sampler is mutually exclussive with shuffle = True
             
-        if 'x_valid' in self.Data.keys():
-            self.val_dataset = Custom_Dataset(self.Data['x_valid']  , self.Data['z_valid'], self.Data['y_valid'][:,-1]) # modified event, e*, lives in -1
+        if 'ECG_valid' in self.Data.keys():
+            self.val_dataset = Custom_Dataset(self.Data['ECG_valid']  , self.Data['Cov_valid'], self.valid_df['E*'].to_numpy()) # modified event, e*, lives in -1
             self.val_dataloader = torch.utils.data.DataLoader (self.val_dataset,  batch_size = self.GPU_minibatch_limit, collate_fn=Custom_Collate, shuffle = False) #DO NOT SHUFFLE
 
-        if 'x_test' in self.Data.keys():
-            self.test_dataset  = Custom_Dataset(self.Data['x_test']  , self.Data['z_test'], self.Data['y_test'][:,-1]) # modified event, e*, lives in -1
+        if 'ECG_test' in self.Data.keys():
+            self.test_dataset  = Custom_Dataset(self.Data['ECG_test']  , self.Data['Cov_test'], self.test_df['E*'].to_numpy()) # modified event, e*, lives in -1
             self.test_dataloader = torch.utils.data.DataLoader (self.test_dataset,  batch_size = self.GPU_minibatch_limit, collate_fn=Custom_Collate, shuffle = False) #DO NOT SHUFFLE
         print('Generic_Model_SurvClass: prep_dataloaders T = ', '{:.2f}'.format(time.time()-a))
 
@@ -141,6 +165,9 @@ class GenericModelClassifierCox(GenericModel):
         imgs = imgs.to(torch.float32) # convert to float32 AFTER putting on GPU
         # imgs = Normalize(imgs, self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev) # frontloaded
         imgs = self.Adjust_Many_Images(imgs) # adjust a batch of ECGs to fit the ECG model #sometimes we want a different shsape
+        
+        # pad ECG to 4096 here
+        imgs = torch.nn.functional.pad(imgs, (648,648),'constant',value=0) # pad to correct shape
         
         labels = labels.to(self.device)
         labels = labels.to(torch.float32) # again, convert type AFTER putting on GPU

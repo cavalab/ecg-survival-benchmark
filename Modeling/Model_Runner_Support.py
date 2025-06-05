@@ -6,6 +6,7 @@ import os
 import h5py
 import time
 import numpy as np
+import pandas as pd
 
 import json # saving args
 
@@ -19,168 +20,411 @@ from sklearn.metrics import average_precision_score
 from MODELS.Support_Functions import Data_Split_Rand
 from MODELS.Support_Functions import Save_to_hdf5
 
+# %% compatability for old sk-learn: import simps
+#taken directly from  from https://github.com/scipy/scipy/blob/v0.18.1/scipy/integrate/quadrature.py#L298
+def tupleset(t, i, value):
+    l = list(t)
+    l[i] = value
+    return tuple(l)
+
+def _basic_simps(y, start, stop, x, dx, axis):
+    nd = len(y.shape)
+    if start is None:
+        start = 0
+    step = 2
+    slice_all = (slice(None),)*nd
+    slice0 = tupleset(slice_all, axis, slice(start, stop, step))
+    slice1 = tupleset(slice_all, axis, slice(start+1, stop+1, step))
+    slice2 = tupleset(slice_all, axis, slice(start+2, stop+2, step))
+
+    if x is None:  # Even spaced Simpson's rule.
+        result = np.sum(dx/3.0 * (y[slice0]+4*y[slice1]+y[slice2]),
+                        axis=axis)
+    else:
+        # Account for possibly different spacings.
+        #    Simpson's rule changes a bit.
+        h = np.diff(x, axis=axis)
+        sl0 = tupleset(slice_all, axis, slice(start, stop, step))
+        sl1 = tupleset(slice_all, axis, slice(start+1, stop+1, step))
+        h0 = h[sl0]
+        h1 = h[sl1]
+        hsum = h0 + h1
+        hprod = h0 * h1
+        h0divh1 = h0 / h1
+        tmp = hsum/6.0 * (y[slice0]*(2-1.0/h0divh1) +
+                          y[slice1]*hsum*hsum/hprod +
+                          y[slice2]*(2-h0divh1))
+        result = np.sum(tmp, axis=axis)
+    return result
+
+def simps(y, x=None, dx=1, axis=-1, even='avg'):
+    """
+    Integrate y(x) using samples along the given axis and the composite
+    Simpson's rule.  If x is None, spacing of dx is assumed.
+
+    If there are an even number of samples, N, then there are an odd
+    number of intervals (N-1), but Simpson's rule requires an even number
+    of intervals.  The parameter 'even' controls how this is handled.
+
+    Parameters
+    ----------
+    y : array_like
+        Array to be integrated.
+    x : array_like, optional
+        If given, the points at which `y` is sampled.
+    dx : int, optional
+        Spacing of integration points along axis of `y`. Only used when
+        `x` is None. Default is 1.
+    axis : int, optional
+        Axis along which to integrate. Default is the last axis.
+    even : {'avg', 'first', 'str'}, optional
+        'avg' : Average two results:1) use the first N-2 intervals with
+                  a trapezoidal rule on the last interval and 2) use the last
+                  N-2 intervals with a trapezoidal rule on the first interval.
+
+        'first' : Use Simpson's rule for the first N-2 intervals with
+                a trapezoidal rule on the last interval.
+
+        'last' : Use Simpson's rule for the last N-2 intervals with a
+               trapezoidal rule on the first interval.
+
+    See Also
+    --------
+    quad: adaptive quadrature using QUADPACK
+    romberg: adaptive Romberg quadrature
+    quadrature: adaptive Gaussian quadrature
+    fixed_quad: fixed-order Gaussian quadrature
+    dblquad: double integrals
+    tplquad: triple integrals
+    romb: integrators for sampled data
+    cumtrapz: cumulative integration for sampled data
+    ode: ODE integrators
+    odeint: ODE integrators
+
+    Notes
+    -----
+    For an odd number of samples that are equally spaced the result is
+    exact if the function is a polynomial of order 3 or less.  If
+    the samples are not equally spaced, then the result is exact only
+    if the function is a polynomial of order 2 or less.
+
+    """
+    y = np.asarray(y)
+    nd = len(y.shape)
+    N = y.shape[axis]
+    last_dx = dx
+    first_dx = dx
+    returnshape = 0
+    if x is not None:
+        x = np.asarray(x)
+        if len(x.shape) == 1:
+            shapex = [1] * nd
+            shapex[axis] = x.shape[0]
+            saveshape = x.shape
+            returnshape = 1
+            x = x.reshape(tuple(shapex))
+        elif len(x.shape) != len(y.shape):
+            raise ValueError("If given, shape of x must be 1-d or the "
+                             "same as y.")
+        if x.shape[axis] != N:
+            raise ValueError("If given, length of x along axis must be the "
+                             "same as y.")
+    if N % 2 == 0:
+        val = 0.0
+        result = 0.0
+        slice1 = (slice(None),)*nd
+        slice2 = (slice(None),)*nd
+        if even not in ['avg', 'last', 'first']:
+            raise ValueError("Parameter 'even' must be "
+                             "'avg', 'last', or 'first'.")
+        # Compute using Simpson's rule on first intervals
+        if even in ['avg', 'first']:
+            slice1 = tupleset(slice1, axis, -1)
+            slice2 = tupleset(slice2, axis, -2)
+            if x is not None:
+                last_dx = x[slice1] - x[slice2]
+            val += 0.5*last_dx*(y[slice1]+y[slice2])
+            result = _basic_simps(y, 0, N-3, x, dx, axis)
+        # Compute using Simpson's rule on last set of intervals
+        if even in ['avg', 'last']:
+            slice1 = tupleset(slice1, axis, 0)
+            slice2 = tupleset(slice2, axis, 1)
+            if x is not None:
+                first_dx = x[tuple(slice2)] - x[tuple(slice1)]
+            val += 0.5*first_dx*(y[slice2]+y[slice1])
+            result += _basic_simps(y, 1, N-2, x, dx, axis)
+        if even == 'avg':
+            val /= 2.0
+            result /= 2.0
+        result = result + val
+    else:
+        result = _basic_simps(y, 0, N-2, x, dx, axis)
+    if returnshape:
+        x = x.reshape(saveshape)
+    return result
+
+
 # %% Arg processing
-def get_covariates(args):
-    val_covariate_col_list = []
-    if ('val_covariate_col_list' in args.keys()):
-        val_covariate_col_list = [int(k) for k in args['val_covariate_col_list'][1:-1].split(',')]
+# def get_covariates(args):
+#     val_covariate_col_list = []
+#     if ('val_covariate_col_list' in args.keys()):
+#         val_covariate_col_list = [int(k) for k in args['val_covariate_col_list'][1:-1].split(',')]
         
-    test_covariate_col_list = []
-    if ('test_covariate_col_list' in args.keys()):
-        test_covariate_col_list = [int(k) for k in args['test_covariate_col_list'][1:-1].split(',')]
+#     test_covariate_col_list = []
+#     if ('test_covariate_col_list' in args.keys()):
+#         test_covariate_col_list = [int(k) for k in args['test_covariate_col_list'][1:-1].split(',')]
         
-    return val_covariate_col_list, test_covariate_col_list
+#     return val_covariate_col_list, test_covariate_col_list
 
 
-def provide_data_details(args, Data, Train_Col_Names, Test_Col_Names):
-    from scipy.stats import ttest_ind
-    from scipy.stats import chi2_contingency
-    # after the data has been cleaned, we can look at some distributions
+# def provide_data_details(args, Data, Train_Col_Names, Test_Col_Names):
+#     from scipy.stats import ttest_ind
+#     from scipy.stats import chi2_contingency
+#     # after the data has been cleaned, we can look at some distributions
     
-    # only get data details from the training set
-    if (Train_Col_Names !=Test_Col_Names):
-        return 0   
+#     # only get data details from the training set
+#     if (Train_Col_Names !=Test_Col_Names):
+#         return 0   
 
-    PID_index = 0 # PID is always at zero
-    event_index = int(args['y_col_train_event'])
-    tte_index = int(args['y_col_train_time'])
+#     PID_index = 0 # PID is always at zero
+#     event_index = int(args['y_col_train_event'])
+#     tte_index = int(args['y_col_train_time'])
 
-    # find 'is_male' column ('is_male' in BCH, Code-15, 'Gender' in MIMIC)
-    for i,k in enumerate(Train_Col_Names):
-        if k == 'Gender' or k== 'is_male':
-            is_male_index=i
-            break
+#     # find 'is_male' column ('is_male' in BCH, Code-15, 'Gender' in MIMIC)
+#     for i,k in enumerate(Train_Col_Names):
+#         if k == 'Gender' or k== 'is_male':
+#             is_male_index=i
+#             break
     
-    # find 'age' column ('age' in BCH, Code-15, 'Age' in MIMIC)
-    for i,k in enumerate(Train_Col_Names):
-        if k == 'age' or k== 'Age':
-            age_index=i
-            break
+#     # find 'age' column ('age' in BCH, Code-15, 'Age' in MIMIC)
+#     for i,k in enumerate(Train_Col_Names):
+#         if k == 'age' or k== 'Age':
+#             age_index=i
+#             break
         
-    train_cases = Data['y_train']
-    test_cases = Data['y_test']
-    combined_cases = np.vstack((Data['y_train'], Data['y_test']))
+#     train_cases = Data['y_train']
+#     test_cases = Data['y_test']
+#     combined_cases = np.vstack((Data['y_train'], Data['y_test']))
     
-    male_cases =   combined_cases[combined_cases[:,is_male_index] == 1]
-    female_cases = combined_cases[combined_cases[:,is_male_index] == 0]
+#     male_cases =   combined_cases[combined_cases[:,is_male_index] == 1]
+#     female_cases = combined_cases[combined_cases[:,is_male_index] == 0]
     
-    male_pos_cases = male_cases[male_cases[:,event_index]==1,:]
-    male_neg_cases = male_cases[male_cases[:,event_index]==0,:]
+#     male_pos_cases = male_cases[male_cases[:,event_index]==1,:]
+#     male_neg_cases = male_cases[male_cases[:,event_index]==0,:]
     
-    female_pos_cases = female_cases[female_cases[:,event_index]==1,:]
-    female_neg_cases = female_cases[female_cases[:,event_index]==0,:]
+#     female_pos_cases = female_cases[female_cases[:,event_index]==1,:]
+#     female_neg_cases = female_cases[female_cases[:,event_index]==0,:]
     
     
-    pos_cases = combined_cases[combined_cases[:,event_index]==1]
-    neg_cases = combined_cases[combined_cases[:,event_index]==0]
+#     pos_cases = combined_cases[combined_cases[:,event_index]==1]
+#     neg_cases = combined_cases[combined_cases[:,event_index]==0]
     
-    print('\n by ECG')
-    print('ECG_n ', len(train_cases)+len(test_cases))
-    print('ECG_n Pos', sum(train_cases[:,event_index]==1)  + sum(test_cases[:,event_index]==1) )
-    print('ECG_n Neg', sum(train_cases[:,event_index]==0)  + sum(test_cases[:,event_index]==0) )
-    print('Do these add up? ', (sum(train_cases[:,event_index]==1)  + sum(test_cases[:,event_index]==1) + sum(train_cases[:,event_index]==0)  + sum(test_cases[:,event_index]==0)  == len(train_cases)+len(test_cases)))
+#     print('\n by ECG')
+#     print('ECG_n ', len(train_cases)+len(test_cases))
+#     print('ECG_n Pos', sum(train_cases[:,event_index]==1)  + sum(test_cases[:,event_index]==1) )
+#     print('ECG_n Neg', sum(train_cases[:,event_index]==0)  + sum(test_cases[:,event_index]==0) )
+#     print('Do these add up? ', (sum(train_cases[:,event_index]==1)  + sum(test_cases[:,event_index]==1) + sum(train_cases[:,event_index]==0)  + sum(test_cases[:,event_index]==0)  == len(train_cases)+len(test_cases)))
     
-    print('\n by PID')
-    print('train PID unique ', len(np.unique(Data['y_train'][:,PID_index])))
-    print('test PID unique ', len(np.unique(Data['y_test'][:,PID_index])))
-    print('test+train PID unique ', len(np.unique(combined_cases[:,PID_index])))
-    print('Do these add up? ', len(np.unique(Data['y_test'][:,PID_index])) + len(np.unique(Data['y_train'][:,PID_index])) == len(np.unique(combined_cases[:,PID_index])))
+#     print('\n by PID')
+#     print('train PID unique ', len(np.unique(Data['y_train'][:,PID_index])))
+#     print('test PID unique ', len(np.unique(Data['y_test'][:,PID_index])))
+#     print('test+train PID unique ', len(np.unique(combined_cases[:,PID_index])))
+#     print('Do these add up? ', len(np.unique(Data['y_test'][:,PID_index])) + len(np.unique(Data['y_train'][:,PID_index])) == len(np.unique(combined_cases[:,PID_index])))
     
-    uniques,unique_ind = np.unique(combined_cases[:,PID_index], return_index=True)
-    print('PID pos', sum(combined_cases[unique_ind,event_index]==1))
-    print('PID neg', sum(combined_cases[unique_ind,event_index]==0))
-    print('Do these line up? ', sum(combined_cases[unique_ind,event_index]==1) + sum(combined_cases[unique_ind,event_index]==0) == len(np.unique(combined_cases[:,PID_index])))
+#     uniques,unique_ind = np.unique(combined_cases[:,PID_index], return_index=True)
+#     print('PID pos', sum(combined_cases[unique_ind,event_index]==1))
+#     print('PID neg', sum(combined_cases[unique_ind,event_index]==0))
+#     print('Do these line up? ', sum(combined_cases[unique_ind,event_index]==1) + sum(combined_cases[unique_ind,event_index]==0) == len(np.unique(combined_cases[:,PID_index])))
     
-    # age mean, stdev, by gender
-    print ('\n age (stdev)')
-    print('age ... all ', np.mean(combined_cases[:,age_index]), np.std(combined_cases[:,age_index]) )
-    print('age ... pos ', np.mean(pos_cases[:,age_index]), np.std(pos_cases[:,age_index]) )
-    print('age ... neg ', np.mean(neg_cases[:,age_index]), np.std(neg_cases[:,age_index]) )
-    print('unpared t test: age ~ pos/neg:')
-    print(ttest_ind (pos_cases[:,age_index],neg_cases[:,age_index]))
+#     # age mean, stdev, by gender
+#     print ('\n age (stdev)')
+#     print('age ... all ', np.mean(combined_cases[:,age_index]), np.std(combined_cases[:,age_index]) )
+#     print('age ... pos ', np.mean(pos_cases[:,age_index]), np.std(pos_cases[:,age_index]) )
+#     print('age ... neg ', np.mean(neg_cases[:,age_index]), np.std(neg_cases[:,age_index]) )
+#     print('unpared t test: age ~ pos/neg:')
+#     print(ttest_ind (pos_cases[:,age_index],neg_cases[:,age_index]))
     
-    # by sex,
-    print('\n F/M')
-    print('Num female cases, % of all',len(female_cases), len(female_cases) / (len(female_cases) + len(male_cases)))
-    print('Pos female cases, % of pos',len(female_pos_cases), len(female_pos_cases) / (len(female_pos_cases) + len(male_pos_cases)))
-    print('Neg female cases, % of neg',len(female_neg_cases), len(female_neg_cases) / (len(female_neg_cases) + len(male_neg_cases)))
+#     # by sex,
+#     print('\n F/M')
+#     print('Num female cases, % of all',len(female_cases), len(female_cases) / (len(female_cases) + len(male_cases)))
+#     print('Pos female cases, % of pos',len(female_pos_cases), len(female_pos_cases) / (len(female_pos_cases) + len(male_pos_cases)))
+#     print('Neg female cases, % of neg',len(female_neg_cases), len(female_neg_cases) / (len(female_neg_cases) + len(male_neg_cases)))
     
-    print('Num male cases, % of all',len(male_cases), len(male_cases) / (len(female_cases) + len(male_cases)))
-    print('Pos male cases, % of pos',len(male_pos_cases), len(male_pos_cases) / (len(female_pos_cases) + len(male_pos_cases)))
-    print('Neg male cases, % of neg',len(male_neg_cases), len(male_neg_cases) / (len(female_neg_cases) + len(male_neg_cases)))
-    print('chi square test on contingency table: gender ~ pos/neg:')
-    print(chi2_contingency( [[len(female_pos_cases), len(female_neg_cases)], [len(male_pos_cases), len(male_neg_cases)]]))
+#     print('Num male cases, % of all',len(male_cases), len(male_cases) / (len(female_cases) + len(male_cases)))
+#     print('Pos male cases, % of pos',len(male_pos_cases), len(male_pos_cases) / (len(female_pos_cases) + len(male_pos_cases)))
+#     print('Neg male cases, % of neg',len(male_neg_cases), len(male_neg_cases) / (len(female_neg_cases) + len(male_neg_cases)))
+#     print('chi square test on contingency table: gender ~ pos/neg:')
+#     print(chi2_contingency( [[len(female_pos_cases), len(female_neg_cases)], [len(male_pos_cases), len(male_neg_cases)]]))
     
-    # followup years
-    print('\n Followup')
-    print('followup all ', np.mean(combined_cases[:,tte_index]), np.std(combined_cases[:,tte_index]))
-    print('followup pos ', np.mean(pos_cases[:,tte_index]), np.std(pos_cases[:,tte_index]))
-    print('followup neg ', np.mean(neg_cases[:,tte_index]), np.std(neg_cases[:,tte_index]))
-    print('unpared t test: followup T ~ pos/neg:')
-    print(ttest_ind (pos_cases[:,tte_index],neg_cases[:,tte_index]))
+#     # followup years
+#     print('\n Followup')
+#     print('followup all ', np.mean(combined_cases[:,tte_index]), np.std(combined_cases[:,tte_index]))
+#     print('followup pos ', np.mean(pos_cases[:,tte_index]), np.std(pos_cases[:,tte_index]))
+#     print('followup neg ', np.mean(neg_cases[:,tte_index]), np.std(neg_cases[:,tte_index]))
+#     print('unpared t test: followup T ~ pos/neg:')
+#     print(ttest_ind (pos_cases[:,tte_index],neg_cases[:,tte_index]))
 
 # %% Load Data
-def Load_Data(args):
+def Load_Labels(args):
     start_time = time.time()
-    Data = {}
     datapath1 = os.path.dirname(os.getcwd()) # cleverly jump one one folder without referencing \\ (windows) or '/' (E3)
-    with h5py.File(os.path.join(datapath1,'HDF5_DATA',args['Train_Folder'],'TRAIN_DATA','Train_Data.hdf5'), "r") as f:
-        Data['x_train'] = f['x'][()]
-        Data['y_train'] = f['y'][()]
-        Train_Col_Names = [k.decode('UTF-8') for k in f['column_names'][()]]
     
-    with h5py.File(os.path.join(datapath1,'HDF5_DATA',args['Test_Folder'],'TEST_DATA','Test_Data.hdf5'), "r") as f:
-        Data['x_test'] = f['x'][()]
-        Data['y_test'] = f['y'][()] 
-        Test_Col_Names = [k.decode('UTF-8') for k in f['column_names'][()]]
+    if (args['Train_Folder'] == 'Code15'):
+        train_csv_path = os.path.join(datapath1, 'HDF5_DATA',args['Train_Folder'],'Labels_Code15_mort_032025_pd_8020.csv')
+    if (args['Train_Folder'] == 'BCH'):
+        train_csv_path = os.path.join(datapath1, 'HDF5_DATA',args['Train_Folder'],'BCH_Mort_Labels_042225.csv')
+    if (args['Train_Folder'] == 'MIMICIV'):
+        train_csv_path = os.path.join(datapath1, 'HDF5_DATA',args['Train_Folder'],'Labels_MIMICIV_mort_032025_pd_8020.csv')
+        # csv_path = os.path.join(datapath1, 'HDF5_DATA',args['Train_Folder'],'Labels_Code15_mort_032025_pd_8020.csv')
         
+    if (args['Test_Folder'] == 'Code15'):
+        test_csv_path = os.path.join(datapath1, 'HDF5_DATA',args['Test_Folder'],'Labels_Code15_mort_032025_pd_8020.csv')
+    if (args['Test_Folder'] == 'BCH'):
+        test_csv_path = os.path.join(datapath1, 'HDF5_DATA',args['Test_Folder'],'BCH_Mort_Labels_042225.csv')
+    if (args['Test_Folder'] == 'MIMICIV'):
+        test_csv_path = os.path.join(datapath1, 'HDF5_DATA',args['Test_Folder'],'Labels_MIMICIV_mort_032025_pd_8020.csv')
+        
+    # 1. find test/train split rows
+    train_labels = pd.read_csv(train_csv_path)
+    train_rows = train_labels[train_labels['Test_Train_split_12345']=='tr'].index.values
+    
+    test_labels = pd.read_csv(test_csv_path)
+    test_rows  = test_labels[test_labels['Test_Train_split_12345']=='te'].index.values
+    
+    # 2. Check for debug case - load only first 1k of each
+    if ('debug' in args.keys()):
+        if (args['debug']=='True'):
+            debug_amount = 5000
+            train_rows = train_rows[:debug_amount]
+            test_rows  = test_rows[:debug_amount]
+        
+    # 3. split labels into test/train
+    train_df  = train_labels.loc[train_rows].copy().reset_index(drop=True)
+    test_df   = test_labels.loc[test_rows].copy().reset_index(drop=True)
+        
+    # 5. check if PID is processed correctly
+    if ((max(train_labels['PID']) > 16777217) or ((max(test_labels['PID']) > 16777217))):
+        if ((train_labels['PID'].dtype == 'float32') or (test_labels['PID'].dtype == 'float32')):
+            print('PID exceeds float32 limits, but is float32!')
+            breakpoint()
+            
+    return  train_df, test_df
+# %%
+def Load_ECG_and_Cov(train_df, valid_df, test_df, args):
+    # Load ECG; match the SID in case the ECG is out of order 
+    # Input: dataframes, args
+    # Outputs: Data{}, containing ECG and covariates in numpy arrays
+    
+    start_time = time.time()
+    Data={}
+    datapath1 = os.path.dirname(os.getcwd()) # cleverly jump one one folder without referencing \\ (windows) or '/' (E3)
+    
+    if (args['Train_Folder'] == 'Code15'):
+        train_ecg_path = os.path.join(datapath1, 'HDF5_DATA',args['Train_Folder'],'Code15_ECG.hdf5')
+    if (args['Train_Folder'] == 'BCH'):
+        train_ecg_path = os.path.join(datapath1, 'HDF5_DATA',args['Train_Folder'],'BCH_All_ECG_042225.hdf5')
+    if (args['Train_Folder'] == 'MIMICIV'):
+        train_ecg_path = os.path.join(datapath1, 'HDF5_DATA',args['Train_Folder'],'MIMIC_ECG.hdf5')
+        # ecg_path = os.path.join(datapath1, 'HDF5_DATA',args['Train_Folder'],'Code15_ECG.hdf5')
+        
+    if (args['Test_Folder'] == 'Code15'):
+        test_ecg_path = os.path.join(datapath1, 'HDF5_DATA',args['Test_Folder'],'Code15_ECG.hdf5')
+    if (args['Test_Folder'] == 'BCH'):
+        test_ecg_path = os.path.join(datapath1, 'HDF5_DATA',args['Test_Folder'],'BCH_All_ECG_042225.hdf5')
+    if (args['Test_Folder'] == 'MIMICIV'):
+        test_ecg_path = os.path.join(datapath1, 'HDF5_DATA',args['Test_Folder'],'MIMIC_ECG.hdf5')
+        
+    # 4. pull in ECG
+    with h5py.File(train_ecg_path, "r") as f:
+        
+        # Pull Training ECG data
+        ECG_SID_Row  = {SID:i for i,SID in enumerate(f['SID'])} # Which ECG.h5 row corresponds to which SID?
+        rows_to_pull = np.array([ECG_SID_Row[SID] for SID in train_df['SID']]) # Find the rows for our dataframe
+        Data['ECG_train'] = f['ECG'][np.sort(rows_to_pull)] # pull those rows in ascending order (hp5y requirement)
+        train_df['ECG_Row_Num'] = rows_to_pull # sort the dataframe in ascending row-pulled order
+        train_df = train_df.sort_values(by=["ECG_Row_Num"]).reset_index(drop=True)
+        
+        # Pull Validation ECG data
+        # ECG_SID_Row  = {SID:i for i,SID in enumerate(f['SID'])} # Which ECG.h5 row corresponds to which SID?
+        rows_to_pull = np.array([ECG_SID_Row[SID] for SID in valid_df['SID']]) # Find the rows for our dataframe
+        Data['ECG_valid'] = f['ECG'][np.sort(rows_to_pull)] # pull those rows in ascending order (hp5y requirement)
+        valid_df['ECG_Row_Num'] = rows_to_pull # sort the dataframe in ascending row-pulled order
+        valid_df = valid_df.sort_values(by=["ECG_Row_Num"]).reset_index(drop=True)
+
+    with h5py.File(test_ecg_path, "r") as f:                            
+        # Pull Test ECG data
+        ECG_SID_Row  = {SID:i for i,SID in enumerate(f['SID'])} # Which ECG.h5 row corresponds to which SID?
+        rows_to_pull = np.array([ECG_SID_Row[SID] for SID in test_df['SID']]) # Find the rows for our dataframe
+        Data['ECG_test'] = f['ECG'][np.sort(rows_to_pull)] # pull those rows in ascending order (hp5y requirement)
+        test_df['ECG_Row_Num'] = rows_to_pull # sort the dataframe in ascending row-pulled order
+        test_df = test_df.sort_values(by=["ECG_Row_Num"]).reset_index(drop=True)
+        
+    # 5. Assemble Covariates into numpy tables
+    if ('covariates' in args.keys()):
+        cov_list = args['covariates'][1:-1].split(',')
+        Data['Cov_train'] = train_df[cov_list].to_numpy().astype(np.float32)
+        Data['Cov_valid'] = valid_df[cov_list].to_numpy().astype(np.float32)
+        Data['Cov_test']  =  test_df[cov_list].to_numpy().astype(np.float32)
+    else:
+        Data['Cov_train'] = []
+        Data['Cov_valid'] = []
+        Data['Cov_test']  = []
+    
     print('Model_Runner: Loaded Train and Test data. Data Load Time: ' + str(time.time()-start_time) )
     
-    # check if PID is processed correctly
-    if (max(Data['y_train'][:,0]) > 16777217):
-        if (Data['y_train'].dtype == np.float32):
-            print('PID exceeds float32 limits!')
-            assert(Data['y_train'].dtype != np.float32)
+    # if the lead order is different from the Code-15 standard, (MIMIC-IV), reorder test data to match training data
+    if (args['Train_Folder'] != args['Test_Folder']):
+        # MIMICIV in test folder, change {I, II, III, avR, avF, avL} (from header files, differs from publication) to {I, II, III, avR, avL, avF}
+        if (args['Test_Folder'] == 'MIMICIV') :
+            Data['ECG_test'][:,:,[4,5]] = Data['ECG_test'][:,:,[5,4]]
+            print('\n Reordered MIMICIV Test set to match non-MIMICIV Train Set\n')
+        # MIMICIV in train folder, change non-MIMIC {I, II, III, avR, avL, avF} to MIMIC's {I, II, III, avR, avF, avL} (from header files, differs from publication)
+        elif (args['Train_Folder'] == 'MIMICIV'):
+            Data['ECG_test'][:,:,[4,5]] = Data['ECG_test'][:,:,[5,4]]
+            print('\n Reordered Code15-lead-order Test set to match MIMICIV-lead-order Train Set\n')
+        
     
-    return Data, Train_Col_Names, Test_Col_Names
+    # you adjusted the dataframes, so return those as well
+    return Data, train_df, valid_df, test_df
+    
 
-# %% Clean Data
-def Clean_Data(Data, args):
-    # Input: Dictionary Data with keys 'x_train', 'y_train', 'x_test', 'y_test'. Each is a numpy array
-    # Output: None. Dictionaries are passed by reference, so we change the arrays idrectly
-    # Task: Clean the data.
-    # Sometimes time-to-event is '-1.0' meaning no follow up time.
-    # Sometimes TTE < 0 (recording error?)
-    # Sometimes ECG (x_train/test) contains NaNs
-    # Find and trash those indices  
+# %% Clean Data [obsolete 04/25/25 - now handled in raw -> hdf5 conversion]
+# def Clean_Data(Data, args):
+#     # Input: Dictionary Data with keys 'x_train', 'y_train', 'x_test', 'y_test'. Each is a numpy array
+#     # Output: None. Dictionaries are passed by reference, so we change the arrays idrectly
+#     # Task: Clean the data.
+#     # Sometimes time-to-event is '-1.0' meaning no follow up time.
+#     # Sometimes TTE < 0 (recording error?)
+#     # Sometimes ECG (x_train/test) contains NaNs
+#     # Find and trash those indices  
     
-    start_time = time.time()
-    for key in ['y_train', 'y_test']:
-        if ( (key in Data.keys()) and (len(Data[key].shape) > 1) ):
-            x_key = 'x' + key[1:]
+#     start_time = time.time()
+#     for key in ['y_train', 'y_test']:
+#         if ( (key in Data.keys()) and (len(Data[key].shape) > 1) ):
+#             x_key = 'x' + key[1:]
             
-            # mark negative TTE
-            if (key == 'y_train'):
-                neg_inds = np.where(Data[key][:,int(args['y_col_train_time'])] < 0)[0]
-            elif (key == 'y_test'):
-                neg_inds = np.where(Data[key][:,int(args['y_col_test_time'])] < 0)[0]
-            inds_to_del = neg_inds.tolist()
+#             # mark negative TTE
+#             if (key == 'y_train'):
+#                 neg_inds = np.where(Data[key][:,int(args['y_col_train_time'])] < 0)[0]
+#             elif (key == 'y_test'):
+#                 neg_inds = np.where(Data[key][:,int(args['y_col_test_time'])] < 0)[0]
+#             inds_to_del = neg_inds.tolist()
             
-            # mark nan traces (5x faster than summing isnan over the whole array)
-            for i in range(Data[x_key].shape[0]):
-                if (np.isnan(Data[x_key][i]).any()):
-                    if i not in inds_to_del:
-                        inds_to_del.append(i)           
+#             # mark nan traces (5x faster than summing isnan over the whole array)
+#             for i in range(Data[x_key].shape[0]):
+#                 if (np.isnan(Data[x_key][i]).any()):
+#                     if i not in inds_to_del:
+#                         inds_to_del.append(i)           
                      
-            # remove data, avoid calling np.delete on Data cause that doubles RAM - just select the indices to keep instead
-            if (len(inds_to_del) > 0):
-                print('removing ' + str(len(inds_to_del)) + ' inds with nan or negative time')
-                inds_to_keep = np.delete( np.arange(Data[key].shape[0]), inds_to_del )
-                Data[x_key] = Data[x_key][inds_to_keep] 
-                Data[key] = Data[key][inds_to_keep] 
+#             # remove data, avoid calling np.delete on Data cause that doubles RAM - just select the indices to keep instead
+#             if (len(inds_to_del) > 0):
+#                 print('removing ' + str(len(inds_to_del)) + ' inds with nan or negative time')
+#                 inds_to_keep = np.delete( np.arange(Data[key].shape[0]), inds_to_del )
+#                 Data[x_key] = Data[x_key][inds_to_keep] 
+#                 Data[key] = Data[key][inds_to_keep] 
             
-    # Don't return anything - Data is a dict and so passed by reff
-    print('Model_Runner: Checked data for negative time and nan ECG. Data Clean Time: ' + str(time.time()-start_time) )
+#     # Don't return anything - Data is a dict and so passed by reff
+#     print('Model_Runner: Checked data for negative time and nan ECG. Data Clean Time: ' + str(time.time()-start_time) )
 
 # %% Horizoning
 # Classifiers have to compact event (1/0) and time-to-event (flt > 0) into a single value (because event->1 as TTE-> 120)
@@ -189,133 +433,98 @@ def Clean_Data(Data, args):
 # This means that patients that are censored ARE ASSUMED TO HAVE SURVIVED.
 # ... which is imperfect but isn't particularly unreasonable for Code-15 or MIMIC-IV
 
-def Apply_Horizon(Data, args):
+def Apply_Horizon(train_df, test_df, args):
+
     # Meant for classifiers 
     # find which cases have events preceding the 'horizon' arg
     # marks those as a '1', else 0. [E*]
-    # appends 'y_data' (the labels) with [PID, TTE*, E*] at indices [-3, -2, -1], respectively. 
-    # ^ TTE* = TTE. That's there in case we want to add right-censoring, which we currently aren't.
+    # also append [TTE*]; currently = TTE. That's there in case we want to add right-censoring, which we currently aren't.
     start_time = time.time()
-
-    assert('horizon' in args.keys())
-    assert('y_col_train_time' in args.keys())
-    assert('y_col_train_event' in args.keys())
-    assert('y_col_test_time' in args.keys())
-    assert('y_col_test_event' in args.keys())
-    
-    # y_train
-    # expand Data['y_train'] with extra columns showing PID, TTE*, and E*, where TTE* and E* are the times/events we are training on. Don't modify original TTE/E, which we evaluate survival models on.
-    assert ( ('y_train' in Data.keys()) and (len(Data['y_train'].shape) > 1) )
-    print('Model_Runner: limiting training TTE to time horizon! assuming class 1 if event by H, else 0 (incl censor)')
     
     horizon = float(args['horizon'])
-    times_below_h = Data['y_train'][:,int(args['y_col_train_time'])] <= horizon
-    event = abs (Data['y_train'][:,int(args['y_col_train_event'])] -1) < 1e-4
-    event_mod = (times_below_h*event).astype(int) # did event happen? Leave a (k,) shape array
+    train_df['E*'] = (train_df['Mort_TTE']<horizon * train_df['Mort_Event']).astype(int)
+    train_df['TTE*'] = train_df['Mort_TTE']
     
-    # expand y_train - append PID, TTE*, E* @ column inds [-3,-2,-1], respectively
-    Data['y_train'] = np.concatenate((Data['y_train'], np.expand_dims(Data['y_train'][:,0],1)), axis=1)
-    Data['y_train'] = np.concatenate((Data['y_train'], np.expand_dims(Data['y_train'][:,int(args['y_col_train_time'])],1)), axis=1)
-    Data['y_train'] = np.concatenate((Data['y_train'], np.expand_dims(event_mod,1)), axis=1)
-    
-        
-    # y_test
-    assert ( ('y_test' in Data.keys()) and (len(Data['y_test'].shape) > 1) )
-    print('Model_Runner: limiting test TTE to time horizon! assuming class 1 if event by H, else 0 (incl censor)')
-    
-    horizon = float(args['horizon'])
-    times_below_h = Data['y_test'][:,int(args['y_col_test_time'])] <= horizon
-    event = abs (Data['y_test'][:,int(args['y_col_test_event'])] -1) < 1e-4
-    event_mod = (times_below_h*event).astype(int) # did event happen? Leave a (k,) shape array
-    
-    # expand y_test - append PID, TTE*, E* @ column inds [-3,-2,-1], respectively
-    Data['y_test'] = np.concatenate((Data['y_test'], np.expand_dims(Data['y_test'][:,0],1)), axis=1)
-    Data['y_test'] = np.concatenate((Data['y_test'], np.expand_dims(Data['y_test'][:,int(args['y_col_test_time'])],1)), axis=1)
-    Data['y_test'] = np.concatenate((Data['y_test'], np.expand_dims(event_mod,1)), axis=1)
+    test_df['E*'] = (test_df['Mort_TTE']<horizon * test_df['Mort_Event']).astype(int)
+    test_df['TTE*'] = test_df['Mort_TTE']
     
     print('Model_Runner: Computed E* for Horizon and augmented Data[y_]. Time Taken: ' + str(time.time()-start_time) )
 
 # %% PyCox Horizoning-step equivalent (doesn't horizon):
-def Augment_Y(Data, args):
-    start_time = time.time()
+# def Augment_Y(Data, args):
+#     start_time = time.time()
     
-    Data['y_train'] = np.concatenate((Data['y_train'], np.expand_dims(Data['y_train'][:,0],1)), axis=1) # PID is assumed to be column 0
-    Data['y_train'] = np.concatenate((Data['y_train'], np.expand_dims(Data['y_train'][:,int(args['y_col_train_time'])],1)), axis=1)
-    Data['y_train'] = np.concatenate((Data['y_train'], np.expand_dims(Data['y_train'][:,int(args['y_col_train_event'])],1)), axis=1)
+#     Data['y_train'] = np.concatenate((Data['y_train'], np.expand_dims(Data['y_train'][:,0],1)), axis=1) # PID is assumed to be column 0
+#     Data['y_train'] = np.concatenate((Data['y_train'], np.expand_dims(Data['y_train'][:,int(args['y_col_train_time'])],1)), axis=1)
+#     Data['y_train'] = np.concatenate((Data['y_train'], np.expand_dims(Data['y_train'][:,int(args['y_col_train_event'])],1)), axis=1)
 
-    # expand y_test - append PID, TTE*, E* @ column inds [-3,-2,-1], respectively
-    Data['y_test'] = np.concatenate((Data['y_test'], np.expand_dims(Data['y_test'][:,0],1)), axis=1)
-    Data['y_test'] = np.concatenate((Data['y_test'], np.expand_dims(Data['y_test'][:,int(args['y_col_test_time'])],1)), axis=1)
-    Data['y_test'] = np.concatenate((Data['y_test'], np.expand_dims(Data['y_test'][:,int(args['y_col_test_event'])],1)), axis=1)
+#     # expand y_test - append PID, TTE*, E* @ column inds [-3,-2,-1], respectively
+#     Data['y_test'] = np.concatenate((Data['y_test'], np.expand_dims(Data['y_test'][:,0],1)), axis=1)
+#     Data['y_test'] = np.concatenate((Data['y_test'], np.expand_dims(Data['y_test'][:,int(args['y_col_test_time'])],1)), axis=1)
+#     Data['y_test'] = np.concatenate((Data['y_test'], np.expand_dims(Data['y_test'][:,int(args['y_col_test_event'])],1)), axis=1)
     
-    print('Model_Runner: Restructured Data. Total time elapsed: ' + str(time.time()-start_time) ) 
+#     print('Model_Runner: Restructured Data. Total time elapsed: ' + str(time.time()-start_time) ) 
 
 # %% Split Ddata
-def Split_Data(Data):
+def Split_Data(train_df):
     # Split loaded "training" data RANDOMLY BY PATIENT ID
-    # Input is Dict; split will be based on 'y_train'
-    # Ooutput: None; working with dict passed by reference
+    # Into train / validation based on the random seed.
     start_time = time.time()
     
-    if ('y_train' in Data.keys()):
-        
-        # NeurIPS version - split Training dataset 80 / 20 into Tr/Val. Test is separate file.
-        TR = 80
-        VA = 20
-        TE = 00
-        
-        # Per ID, find matching data rows      
-        Subj_IDs = Data['y_train'][:,-3]        # PID is now at -3    
-        Subj_IDs_Unique = np.unique(Subj_IDs)
-        
-        #Speedup 08/14/24. Much faster than repeat calls to np.where()
-        Subj_ID_to_Rows_Dict = {} # Per PID find rows in the numpy array
-        for ind,val in enumerate(Subj_IDs):
-            if val in Subj_ID_to_Rows_Dict.keys():
-                Subj_ID_to_Rows_Dict[val].append(ind)
-            else:
-                Subj_ID_to_Rows_Dict[val] = [ind]
-                
-        # Split the indices of Subj_IDs_Unique into train/validation/test
-        Train_Inds, Val_Inds, Test_Inds = Data_Split_Rand( [k for k in range(len(Subj_IDs_Unique))], TR, VA, TE)
-
-        # Speedup 08/14/24
-        Train_Inds_ECG  = [Row for Unique_PID_Ind in Train_Inds for Row in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[Unique_PID_Ind]] ]
-        Val_Inds_ECG  = [Row for Unique_PID_Ind in Val_Inds for Row in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[Unique_PID_Ind]] ]
-        # Test_Inds_ECG = [Row for PID in Test_Inds for Row in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[PID]] ]
-        
-        Data['x_valid'] = Data['x_train'][Val_Inds_ECG]
-        Data['x_train'] = Data['x_train'][Train_Inds_ECG]
+    # NeurIPS version - split Training dataset 80 / 20 into Tr/Val. Test is separate file.
+    TR = 80
+    VA = 20
+    TE = 00
     
-        Data['y_valid'] = Data['y_train'][Val_Inds_ECG]
-        Data['y_train'] = Data['y_train'][Train_Inds_ECG]
-          
-    else:
-        print('No Data Split')
+    # Per ID, find matching data rows      
+    Subj_IDs = train_df['PID']          
+    Subj_IDs_Unique = np.unique(Subj_IDs)
+    
+    #Speedup 08/14/24. Much faster than repeat calls to np.where()
+    Subj_ID_to_Rows_Dict = {} # Per PID find rows in the numpy array
+    for ind,val in enumerate(Subj_IDs):
+        if val in Subj_ID_to_Rows_Dict.keys():
+            Subj_ID_to_Rows_Dict[val].append(ind)
+        else:
+            Subj_ID_to_Rows_Dict[val] = [ind]
+            
+    # Split the indices of Subj_IDs_Unique into train/validation/test
+    Train_Inds, Val_Inds, Test_Inds = Data_Split_Rand( [k for k in range(len(Subj_IDs_Unique))], TR, VA, TE)
+    
+    # Speedup 08/14/24
+    Train_Inds_ECG  = [Row for Unique_PID_Ind in Train_Inds for Row in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[Unique_PID_Ind]] ]
+    Val_Inds_ECG  = [Row for Unique_PID_Ind in Val_Inds for Row in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[Unique_PID_Ind]] ]
+    # Test_Inds_ECG = [Row for PID in Test_Inds for Row in Subj_ID_to_Rows_Dict[Subj_IDs_Unique[PID]] ]
+    
+    Val_Inds_ECG = np.array(Val_Inds_ECG)
+    
+    # Split the training dataframes
+    valid_df  = train_df.loc[Val_Inds_ECG].copy().reset_index(drop=True)
+    train_df  = train_df.loc[Train_Inds_ECG].copy().reset_index(drop=True)
     
     print('Model_Runner: Split Train into Train/Valid. Data Split Time: ' + str(time.time()-start_time) )                            
+    return train_df, valid_df 
         
 # %% Debug Data subset - pick 1k elements of train/val/test
-def DebugSubset_Data(Data, args):
-    
-    if('debug' in args.keys()):
-        if args['debug'] == 'True':
-            debug = True
-            sub_len = 1000
-            if (debug):
-                print("Model_Runner: WARNING - DEBUG speedup! only using "+str(sub_len)+' elems of tr/val/test!')
+# def DebugSubset_Data(Data, args):
+#     if('debug' in args.keys()):
+#         if args['debug'] == 'True':
+#             debug = True
+#             sub_len = 1000
+#             if (debug):
+#                 print("Model_Runner: WARNING - DEBUG speedup! only using "+str(sub_len)+' elems of tr/val/test!')
                 
-                tr_inds = np.random.randint(0, Data['x_train'].shape[0], (sub_len))
-                va_inds = np.random.randint(0, Data['x_valid'].shape[0], (sub_len))
-                te_inds = np.random.randint(0, Data['x_test'].shape[0], (sub_len))
+#                 tr_inds = np.random.randint(0, Data['x_train'].shape[0], (sub_len))
+#                 va_inds = np.random.randint(0, Data['x_valid'].shape[0], (sub_len))
+#                 te_inds = np.random.randint(0, Data['x_test'].shape[0], (sub_len))
                 
-                Data['x_train'] = Data['x_train'][tr_inds,:]
-                Data['x_valid'] = Data['x_valid'][va_inds,:]
-                Data['x_test'] = Data['x_test'][te_inds,:]
+#                 Data['x_train'] = Data['x_train'][tr_inds,:]
+#                 Data['x_valid'] = Data['x_valid'][va_inds,:]
+#                 Data['x_test'] = Data['x_test'][te_inds,:]
                 
-                Data['y_train'] = Data['y_train'][tr_inds]
-                Data['y_valid'] = Data['y_valid'][va_inds]
-                Data['y_test'] = Data['y_test'][te_inds]
+#                 Data['y_train'] = Data['y_train'][tr_inds]
+#                 Data['y_valid'] = Data['y_valid'][va_inds]
+#                 Data['y_test'] = Data['y_test'][te_inds]
             
 # %% Folders            
 
@@ -553,49 +762,51 @@ def Gen_Concordance_Brier_No_Bootstrap(surv_df, disc_y_t, disc_y_e, time_points,
     
     print('Model_Runner: No-Bootstrap Conc/Brier Time: ' + str(time.time()-start_time) )    
 
-def Gen_Concordance_Brier_PID_Bootstrap(Data, args, disc_y_t, disc_y_e, surv_df, sample_time_points, time_points):
-    # wrapper. Gets concordance and brier (limited to time-points in time_points, however right that is), picking 1 ECG per patient x 20.
-    start_time = time.time()
+# def Gen_Concordance_Brier_PID_Bootstrap(Data, args, disc_y_t, disc_y_e, surv_df, sample_time_points, time_points):
     
-    # Picking a random ECG per PID, calc concordance and Brier at time_points
-    # (later, they will be combined for all the random seeds into a single mean / stdev / 95% CI)
-    # 1. find relevant rows per subjetc ID
-    if (args['Eval_Dataloader'] == 'Validation'):
-        Subj_IDs = Data['y_valid'][:,-3]    # PID lives in -3
-    elif (args['Eval_Dataloader'] == 'Train'):
-        Subj_IDs = Data['y_train'][:,-3]    
-    else:
-        Subj_IDs = Data['y_test'][:,-3]  
-        
-    Subj_IDs_Unique = np.unique(Subj_IDs)
-    Subj_ID_to_Rows_Dict = {} # map ID to rows
-    for ind,val in enumerate(Subj_IDs):
-        if val in Subj_ID_to_Rows_Dict.keys():
-            Subj_ID_to_Rows_Dict[val].append(ind)
-        else:
-            Subj_ID_to_Rows_Dict[val] = [ind]
-        
-    bootstrap_briers = [] # list of lists
-    bootstrap_concordances = [] # list of lists
+#     breakpoint()
+#     # wrapper. Gets concordance and brier (limited to time-points in time_points, however right that is), picking 1 ECG per patient x 20.
+#     start_time = time.time()
     
-    bootstraps = 20 
-    Inds = [Subj_ID_to_Rows_Dict[k][0] for k in Subj_IDs_Unique]
+#     # Picking a random ECG per PID, calc concordance and Brier at time_points
+#     # (later, they will be combined for all the random seeds into a single mean / stdev / 95% CI)
+#     # 1. find relevant rows per subjetc ID
+#     if (args['Eval_Dataloader'] == 'Validation'):
+#         Subj_IDs = Data['y_valid'][:,-3]    # PID lives in -3
+#     elif (args['Eval_Dataloader'] == 'Train'):
+#         Subj_IDs = Data['y_train'][:,-3]    
+#     else:
+#         Subj_IDs = Data['y_test'][:,-3]  
+        
+#     Subj_IDs_Unique = np.unique(Subj_IDs)
+#     Subj_ID_to_Rows_Dict = {} # map ID to rows
+#     for ind,val in enumerate(Subj_IDs):
+#         if val in Subj_ID_to_Rows_Dict.keys():
+#             Subj_ID_to_Rows_Dict[val].append(ind)
+#         else:
+#             Subj_ID_to_Rows_Dict[val] = [ind]
+        
+#     bootstrap_briers = [] # list of lists
+#     bootstrap_concordances = [] # list of lists
     
-    for b in range (bootstraps):
-        # 3. Sample one revelant Surv row per each subject.
-        for i,s in enumerate(Subj_IDs_Unique):
-            tmp = Subj_ID_to_Rows_Dict[s]
-            if (len(tmp) != 1):
-                Inds[i] = tmp[np.random.randint(0,len(tmp))]
+#     bootstraps = 20 
+#     Inds = [Subj_ID_to_Rows_Dict[k][0] for k in Subj_IDs_Unique]
+    
+#     for b in range (bootstraps):
+#         # 3. Sample one revelant Surv row per each subject.
+#         for i,s in enumerate(Subj_IDs_Unique):
+#             tmp = Subj_ID_to_Rows_Dict[s]
+#             if (len(tmp) != 1):
+#                 Inds[i] = tmp[np.random.randint(0,len(tmp))]
         
-        concordance_score, ipcw_brier_score, chance_at_censored_point  = get_surv_briercordance(disc_y_t[Inds], disc_y_e[Inds], surv_df.iloc[:,Inds], time_points, sample_time_points)
+#         concordance_score, ipcw_brier_score, chance_at_censored_point  = get_surv_briercordance(disc_y_t[Inds], disc_y_e[Inds], surv_df.iloc[:,Inds], time_points, sample_time_points)
         
-        bootstrap_briers.append(ipcw_brier_score)
-        bootstrap_concordances.append(concordance_score)
+#         bootstrap_briers.append(ipcw_brier_score)
+#         bootstrap_concordances.append(concordance_score)
             
-    hdf5_path = os.path.join(args['Model_Eval_Path'], 'Stored_Model_Output.hdf5')
-    Save_to_hdf5(hdf5_path, bootstrap_briers, 'bootstrap_briers')
-    Save_to_hdf5(hdf5_path, bootstrap_concordances, 'bootstrap_concordances')
+#     hdf5_path = os.path.join(args['Model_Eval_Path'], 'Stored_Model_Output.hdf5')
+#     Save_to_hdf5(hdf5_path, bootstrap_briers, 'bootstrap_briers')
+#     Save_to_hdf5(hdf5_path, bootstrap_concordances, 'bootstrap_concordances')
     
     print('Model_Runner: Bootstrap Conc/Brier Time: ' + str(time.time()-start_time) )    
     

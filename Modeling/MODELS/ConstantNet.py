@@ -8,7 +8,7 @@ class ConstantNet(nn.Module):
     
     def __init__(self, const_value):
         super(ConstantNet, self).__init__()
-        self.const_value = const_value
+        self.const_value = torch.tensor(const_value, dtype = torch.float32)
             
     def forward(self, x):
         return torch.full([x.shape[0],1], self.const_value, device = x.device)

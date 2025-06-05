@@ -91,7 +91,6 @@ class FusionModel(nn.Module):
         # direct: if direct, only adds a linear layer between features and out_classes
         #     if indirect,adds 2 linear/relu chunks first 
 
-        
         super(FusionModel, self).__init__()
         # ECG processing chunk
         self.ECG_Model = ECG_Model
@@ -122,7 +121,11 @@ class FusionModel(nn.Module):
         
         # process covariates and append. 
         # only happens if 1) covariates provided and 2) covariate modules initialized
-        if (z.shape[1] > 0):
+
+        # we send a single torch.tensor([]) in Classifier_Cox cases with no covariates
+        # and we send a tensor([], device='cuda:0', size=(64, 0)) in Deep_survival cases iwth no covariates
+        # ... skip covariate processing there
+        if (z.nelement()>0):
             if (len(self.covariate_module_list) > 0):
                 b = z
                 for covariate_layer in self.covariate_module_list:
@@ -246,22 +249,22 @@ class GenericModel:
     # %% Data pieces
     def restructure_data(self):
         a = time.time()
-        for key in ['x_train', 'x_valid', 'x_test']:
+        for key in ['ECG_train', 'ECG_valid', 'ECG_test']:
             if key in self.Data.keys() :
                 self.Data[key] = Structure_Data_NCHW(self.Data[key])
         print('GenericModel: restructure_data T = ', '{:.2f}'.format(time.time()-a))
                 
     def prep_normalization_parameters(self):
         a = time.time()
-        if 'x_train' in self.Data.keys():            
-            self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev = Get_Norm_Func_Params(self.args, self.Data['x_train'])
+        if 'ECG_train' in self.Data.keys():            
+            self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev = Get_Norm_Func_Params(self.args, self.Data['ECG_train'])
         else:
             print('Cant prep normalization')
         print('GenericModel: prep_normalization_parameters T = ', '{:.2f}'.format(time.time()-a))
         
     def normalize_data(self):
         a = time.time()
-        for key in ['x_train', 'x_valid', 'x_test']:
+        for key in ['ECG_train', 'ECG_valid', 'ECG_test']:
             if key in self.Data.keys() :
                 self.Data[key] = Normalize(torch.Tensor(self.Data[key]), self.Normalize_Type, self.Normalize_Mean, self.Normalize_StDev)
         print('GenericModel: normalize_data T = ', '{:.2f}'.format(time.time()-a))
@@ -343,7 +346,7 @@ class GenericModel:
                 np.random.set_state(Import_Dict['Numpy_Random_State'])
                 torch.random.set_rng_state(Import_Dict['Torch_Random_State'])
                 if ('CUDA_Random_State' in Import_Dict.keys()):
-                    torch.cuda.random.set_rng_state(Import_Dict['CUDA_Random_State'])
+                    torch.cuda.random.set_rng_state(Import_Dict['CUDA_Random_State']) # ... somehow opens with 800 '255's in the cluster models...
                 else:
                     print('CUDA RANDOM STATE NOT LOADED. Further training not deterministic')
                 torch.backends.cudnn.deterministic = True # make TRUE if you want reproducible results (slower)

@@ -65,6 +65,10 @@ from MODELS.ConstantNet import get_ConstantNet_model
 from MODELS.ConstantNet import get_ConstantNet_process_single_image
 from MODELS.ConstantNet import get_ConstantNet_process_multi_image
 
+from MODELS.ECGTransForm import get_Transformer_Model
+from MODELS.ECGTransForm import get_Transformer_process_single_image
+from MODELS.ECGTransForm import get_Transformer_process_multi_image
+
 # %% Bugfix - DeepHitSingle, from pcwangustc
 # https://github.com/havakv/pycox/issues/79
 from pycox.models import loss as pycox_loss
@@ -88,16 +92,22 @@ class Custom_Sampler(BatchSampler):
     ... Hobbled together from pytorch documentation.
     This is re-created differently every epoch by the DataLoader
     """
-    def __init__(self, y_data, batch_size, One_Pos_Per_GPU_Batch = False):
-        # sampler gets 'data', so PID is in -3, event in -1, time in -2
-        # 1. figure out length
-        # 2. figure out which indices correspond to '0's (censor) and '1's  (event)
-        self.num_samples = len(y_data)
-        self.y_data = y_data 
+    def __init__(self, dataframe, batch_size, One_Pos_Per_GPU_Batch = False):
+        if ('Disc_TTE' in dataframe.keys()): # LH, MTLR, or DeepHit
+            Disc_TTE = dataframe['Disc_TTE']
+        else:
+            Disc_TTE = dataframe['Mort_TTE'] # CoxPH
+        Mort_Event = dataframe['Mort_Event'].to_numpy()
+        
+        self.num_samples = len(Disc_TTE)
+        
+        self.Disc_TTE = Disc_TTE
+        self.Mort_Event = Mort_Event
+        
         self.batch_size = batch_size
-        self.Event_Inds = [i for i,k in enumerate(y_data[:,-1]) if k==1.0]
-        self.Non_Event_Inds = [i for i,k in enumerate(y_data[:,-1]) if k==0.0]
-        self.weights = torch.tensor([1.0 for k in range(y_data.shape[0])])
+        self.Event_Inds = [i for i,k in enumerate(Mort_Event) if k==1.0]
+        self.Non_Event_Inds = [i for i,k in enumerate(Mort_Event) if k==0.0]
+        self.weights = torch.tensor([1.0 for k in range(Mort_Event.shape[0])])
         self.default_order = False 
         self.One_Pos_Per_GPU_Batch = One_Pos_Per_GPU_Batch # CoxPH needs one positive case per batch to compute loss. 
         
@@ -121,7 +131,7 @@ class Custom_Sampler(BatchSampler):
                 while (k < self.num_samples):
                     start_ind = k
                     end_ind = min(k+self.batch_size, self.num_samples)
-                    if (sum (self.y_data[Random_Indices[start_ind:end_ind],-1]) <0.5): # switched "+1" to "-1" 09/24/24
+                    if (sum (self.Mort_Event[Random_Indices[start_ind:end_ind]]) <0.5): # switched "+1" to "-1" 09/24/24
                         Random_Indices[end_ind-1] = Replacement_Indices[Replace_With_Index]
                         Replace_With_Index = Replace_With_Index+1
                     k = k + self.batch_size
@@ -142,33 +152,45 @@ class Dataset_FuncList(torch.utils.data.Dataset):
     # x,y must be Tensor for CollateFunc
     # ... Return_Toggle changes if just x, or x,y are returned
     
-    def __init__(self, data, targets = None, covariates = None, func_list= None, discretize = False, Toggle = 'XY'):
+    def __init__(self, ECG, dataframe = None, covariates = None, func_list= None, discretize = False, Toggle = 'XY'):
         
-        self.data = data
+        self.ECG = ECG
+        
+        if ('Disc_TTE' in dataframe.keys()): # LH, MTLR, or DeepHit
+            targets = dataframe[['Disc_TTE','Mort_Event']].to_numpy()
+        else:
+            targets = dataframe[['Mort_TTE','Mort_Event']].to_numpy() # CoxPH uses the actual TTE
+        
         if (targets is not None):
             if (discretize):
                 self.targets = torch.tensor(targets.astype(np.int64)) # must be tensor and integer IF DISCRETIZING
             else:
-                self.targets = torch.tensor(targets.astype(np.float64)) # must be tensor 
+                self.targets = torch.tensor(targets.astype(np.float64))
         else:
             self.targets = None
         self.func_list = func_list
         self.Return_Toggle = Toggle # 'X' - return only X. 'XY' - return both in PyCox formats
         
         self.Covariates = torch.tensor(covariates).to(torch.float32) # covariates, like ECG, will be float32
+        if (len(self.Covariates) == 0):
+            self.has_covariates = False
+        else:
+            self.has_covariates = True
 
     def __getitem__(self, index): 
         if isinstance(index, slice): # ... Only LH fit requests 2 elements as a slice... to check their size?
             return [1,2,3] # couldn't actually get it to be happy with returning elements. This seems to work just fine
             
-        x = self.data[index] # pointer, if modifying, torch.clone first (else permanent)
+        x = self.ECG[index] # pointer, if modifying, torch.clone first (else permanent)
         if (self.func_list is not None):
             x = torch.clone(x)
             for k in self.func_list:
                 x = k(x)
                 
-        z = self.Covariates[index] # let's include covariates just like this
-        # z = torch.tensor(z)
+        if (self.has_covariates):
+            z = self.Covariates[index] # let's include covariates just like this
+        else:
+            z = torch.tensor([]) # if no covariates, send a blank entry
         
         if (self.Return_Toggle =='XY'):
             y = self.targets[index]
@@ -177,7 +199,10 @@ class Dataset_FuncList(torch.utils.data.Dataset):
             return (x, z) # must be a tensor, NEEDS A COMMA TO BE A TUPLE containing a tensor
     
     def __len__(self):
-        return self.data.shape[0]
+        return self.ECG.shape[0]
+
+def pad_ECG(img): # padd to 4096 length (to match Ribeiro paper)
+    return torch.nn.functional.pad(img, (648,648),'constant',value=0) # pad to correct shape
 
 def collate_fn(batch):
     # batch is a list of tuples of tensors
@@ -187,22 +212,27 @@ def collate_fn(batch):
     return tt.tuplefy(batch).stack() # demands list of tuples of torch tensors
 
 # %%  ---------------- Start the model
-class Generic_Model_PyCox(GenericModel):
+class GenericModelDeepSurvival(GenericModel):
 
-    def __init__(self, args, Data):
+    def __init__(self, args, Data, train_df, valid_df, test_df):
+        
+        # -1. store pointers to things
+        self.Data = Data
+        self.train_df = train_df
+        self.valid_df = valid_df
+        self.test_df = test_df
+        
         
         # 0. Process input arguments 
         self.process_args_PyCox(args)
-        self.Data = Data
         
         # 1. Adjust data for this model
         self.restructure_data()
         self.prep_normalization_parameters()
-        self.prep_data_discretization()
-        
         self.normalize_data()
-        if (self.max_duration is not None):
-            self.discretize_data()
+        
+        self.prep_data_discretization()    
+        self.discretize_data()
 
         # 2. Grab ECG processing network 
         self.gen_ecg_model()
@@ -215,6 +245,7 @@ class Generic_Model_PyCox(GenericModel):
         
         # 5. build dataloaders (requires ECG processing model)
         self.prep_dataloaders()
+        
         
 
 # %% the model
@@ -238,10 +269,23 @@ class Generic_Model_PyCox(GenericModel):
             self.Adjust_One_Image = get_InceptionTime_process_single_image() # pointer to function
             
         if (self.args['Model_Type'] == 'ZeroNet'):
-            self.model = get_ConstantNet_model(0) # get the ECG interpreting model
+            self.model = get_ConstantNet_model(0.0) # get the ECG interpreting model
             self.Adjust_Many_Images = get_ConstantNet_process_multi_image() # pointer to function
             self.Adjust_One_Image = get_ConstantNet_process_single_image() # pointer to function
+            
+        if (self.args['Model_Type'] == 'ReservoirMLP'):
+            from MODELS.ReservoirMLP import get_ReservoirMLP, get_ReservoirMLP_process_single_image, get_ReservoirMLP_process_multi_image
+            self.model = get_ReservoirMLP() # get the ECG interpreting model
+            self.Adjust_Many_Images = get_ReservoirMLP_process_multi_image() # pointer to function
+            self.Adjust_One_Image = get_ReservoirMLP_process_single_image() # pointer to function
+            
+        if (self.args['Model_Type'] == 'ECGTransForm'):
+            print('getting transformer')
+            self.model = get_Transformer_Model(self.args, n_in_channels) # get the ECG interpreting model
+            self.Adjust_Many_Images = get_Transformer_process_multi_image() # pointer to function
+            self.Adjust_One_Image = get_Transformer_process_single_image() # pointer to function
 
+            
 # %% augment process_args, models should include this in init
     def process_args_PyCox(self, args):
         self.Process_Args(args) # call generic_model's arg processing
@@ -268,18 +312,28 @@ class Generic_Model_PyCox(GenericModel):
 
 # %% data discretization
     def prep_data_discretization(self):
-        self.max_duration = None
-        if 'x_train' in self.Data.keys():
-            self.max_duration = max(self.Data['y_train'][:,-2]) # time now lives @ -2
-            self.labtrans = LogisticHazard.label_transform(self.num_durations)
-            self.labtrans.fit_transform(np.array([0,self.max_duration]), np.array([0,1]))            
+        self.max_duration = max(self.train_df['Mort_TTE'])
+        self.labtrans = LogisticHazard.label_transform(self.num_durations)
+        self.labtrans.fit_transform(np.array([0,self.max_duration]), np.array([0,1]))            
 
     def discretize_data(self):
-        a = time.time()
+        tiiime = time.time()
         if (self.Discretize): # discretizses time-to-event based on [100] time segments
-            for key in ['y_train', 'y_valid', 'y_test']:
-                self.Data[key][:,-2], self.Data[key][:,-1] = self.labtrans.transform(self.Data[key][:,-2], self.Data[key][:,-1]) # TTE lives in [:,-2], Event lives in [:,-1]
-        print('GenericModelPyCox: discretize_data T = ', '{:.2f}'.format(time.time()-a))
+            a,b = self.labtrans.transform(self.train_df['Mort_TTE'].to_numpy(),self.train_df['Mort_Event'].astype(int).to_numpy())
+            self.train_df['Disc_TTE'] = a
+            # self.train_df['E*'] = b
+            
+            a,b = self.labtrans.transform(self.valid_df['Mort_TTE'].to_numpy(),self.valid_df['Mort_Event'].astype(int).to_numpy())
+            self.valid_df['Disc_TTE'] = a
+            # self.valid_df['E*'] = b
+            
+            a,b = self.labtrans.transform(self.test_df['Mort_TTE'].to_numpy(),self.test_df['Mort_Event'].astype(int).to_numpy())
+            self.test_df['Disc_TTE'] = a
+            # self.test_df['E*'] = b
+        
+            # for key in ['y_train', 'y_valid', 'y_test']:
+                # self.Data[key][:,-2], self.Data[key][:,-1] = self.labtrans.transform(self.Data[key][:,-2], self.Data[key][:,-1]) # TTE lives in [:,-2], Event lives in [:,-1]
+        print('GenericModelPyCox: discretize_data T = ', '{:.2f}'.format(time.time()-tiiime))
 
 # %%
 # 1) Prep which functions get called per image
@@ -288,8 +342,11 @@ class Generic_Model_PyCox(GenericModel):
 
     def prep_dataloaders(self):
         a = time.time()
+        
+        # make a list of functions to apply to each ECG
         func_list = []
-        func_list.append(self.Adjust_One_Image) # adjust each ecg individually after loading
+        func_list.append(self.Adjust_One_Image) # adjust each ecg individually after loading (because PyCox is handling training)
+        func_list.append(pad_ECG)
         
         # CoxPH requires one positive case per loss calculation, which the sampler can provide
         if (self.args['pycox_mdl'] == 'CoxPH'):
@@ -297,17 +354,17 @@ class Generic_Model_PyCox(GenericModel):
         else:
             One_Pos_Per_GPU_Batch = False
         
-        if 'x_train' in self.Data.keys():
-            self.train_dataset = Dataset_FuncList(self.Data['x_train'] , targets = self.Data['y_train'][:,[-2,-1]], covariates = self.Data['z_train'], func_list = func_list, discretize=self.Discretize)
-            self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset, batch_size = self.GPU_minibatch_limit, collate_fn=collate_fn, sampler=Custom_Sampler(self.Data['y_train'], self.GPU_minibatch_limit, One_Pos_Per_GPU_Batch = One_Pos_Per_GPU_Batch)) 
+        # if 'x_train' in self.Data.keys():
+        self.train_dataset = Dataset_FuncList(self.Data['ECG_train'] , dataframe = self.train_df, covariates = self.Data['Cov_train'], func_list = func_list, discretize=self.Discretize)
+        self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset, batch_size = self.GPU_minibatch_limit, collate_fn=collate_fn, sampler=Custom_Sampler(self.train_df, self.GPU_minibatch_limit, One_Pos_Per_GPU_Batch = One_Pos_Per_GPU_Batch)) 
 
-        if 'x_valid' in self.Data.keys():
-            self.val_dataset  = Dataset_FuncList(self.Data['x_valid']  , targets = self.Data['y_valid'][:,[-2,-1]], covariates = self.Data['z_valid'], func_list = func_list, discretize=self.Discretize )
-            self.val_dataloader = torch.utils.data.DataLoader (self.val_dataset,  batch_size = self.GPU_minibatch_limit, collate_fn=collate_fn, sampler=Custom_Sampler(self.Data['y_valid'], self.GPU_minibatch_limit, One_Pos_Per_GPU_Batch = One_Pos_Per_GPU_Batch)) 
+        # if 'x_valid' in self.Data.keys():
+        self.val_dataset  = Dataset_FuncList(self.Data['ECG_valid']  , dataframe = self.valid_df, covariates = self.Data['Cov_valid'], func_list = func_list, discretize=self.Discretize )
+        self.val_dataloader = torch.utils.data.DataLoader (self.val_dataset,  batch_size = self.GPU_minibatch_limit, collate_fn=collate_fn, sampler=Custom_Sampler(self.valid_df, self.GPU_minibatch_limit, One_Pos_Per_GPU_Batch = One_Pos_Per_GPU_Batch)) 
 
-        if 'x_test' in self.Data.keys():
-            self.test_dataset = Dataset_FuncList(self.Data['x_test'], targets = self.Data['y_test'][:,[-2,-1]], covariates = self.Data['z_test'], func_list = func_list, discretize=self.Discretize, Toggle='X') #Only returns X, not Y
-            self.test_dataloader = torch.utils.data.DataLoader (self.test_dataset,  batch_size = self.GPU_minibatch_limit, collate_fn=collate_fn, shuffle = False) #DO NOT SHUFFLE
+        # if 'x_test' in self.Data.keys():
+        self.test_dataset = Dataset_FuncList(self.Data['ECG_test'], dataframe = self.test_df, covariates = self.Data['Cov_test'], func_list = func_list, discretize=self.Discretize, Toggle='X') #Only returns X, not Y
+        self.test_dataloader = torch.utils.data.DataLoader (self.test_dataset,  batch_size = self.GPU_minibatch_limit, collate_fn=collate_fn, shuffle = False) #DO NOT SHUFFLE
         print('GenericModel_PyCox: Dataloader prep T = ', '{:.2f}'.format(time.time()-a))
 
 # %% Prep pycox model (here so as not to duplicate in train, load, and run)
@@ -437,7 +494,11 @@ class Generic_Model_PyCox(GenericModel):
         # CoxPH: compute baseline hazards
         if (self.args['pycox_mdl'] == 'CoxPH'):
             # ugly, but necessary
-            self.pycox_mdl.compute_baseline_hazards(input= (self.Adjust_Many_Images(self.Data['x_train']),torch.tensor(self.Data['z_train']).to(torch.float32)), target=[self.Data['y_train'][:,-2],self.Data['y_train'][:,-1]],batch_size = self.GPU_minibatch_limit)
+            if (len(self.Data['Cov_train']) == 0): # no covariates
+                tmp = [[] for k in range(self.Data['ECG_train'].shape[0])]
+                self.pycox_mdl.compute_baseline_hazards(input= (self.Adjust_Many_Images(torch.nn.functional.pad(self.Data['ECG_train'],(0,0,648,648),'constant',value=0)),torch.tensor(tmp).to(torch.float32)), target= [self.train_df['Mort_TTE'].to_numpy(), self.train_df['Mort_Event'].to_numpy()],batch_size = self.GPU_minibatch_limit)
+            else:
+                self.pycox_mdl.compute_baseline_hazards(input= (self.Adjust_Many_Images(torch.nn.functional.pad(self.Data['ECG_train'],(0,0,648,648),'constant',value=0)),torch.tensor(self.Data['Cov_train']).to(torch.float32)), target= [self.train_df['Mort_TTE'].to_numpy(), self.train_df['Mort_Event'].to_numpy()],batch_size = self.GPU_minibatch_limit)
             # note: because we use validation performance to pick the model, we can't build the baselines on validation while that is going on (that's like fitting on the test set)
            
         surv    = self.pycox_mdl.predict_surv(my_dataloader)
@@ -453,7 +514,7 @@ class Generic_Model_PyCox(GenericModel):
             # parse columns of input: [large] x 738. 
             # input columns align with output columns via 't2': ex: array([ 1,  1,  2,  3,  6, 10, 10]). 90 unique values.
             # where a time maps to a bin, fill that in, if there's a gap, fill in prev known value
-            Unique_Time_Points = np.unique(self.Data['y_train'][:,-2])
+            Unique_Time_Points = np.unique(self.train_df['Mort_TTE'].to_numpy())
             t2, k = self.labtrans.transform(Unique_Time_Points, np.ones(Unique_Time_Points.shape))
             surv_out = np.ones( (my_dataloader.dataset.targets.shape[0],len(self.labtrans.cuts)), dtype=float)
             temp_col = surv[:,0]
@@ -482,9 +543,9 @@ class Generic_Model_PyCox(GenericModel):
 
         if (Which_Dataloader == 'Train'): # If we want to evaluate on train, we need to change the dataloader return param first
             self.train_dataloader.dataset.Return_Toggle = 'X'
-            self.val_dataloader.sampler.default_order = True # and don't shuffle
+            self.train_dataloader.sampler.default_order = True # and don't shuffle
             cuts, t, d, surv, surv_df  = self.Run_NN(self.train_dataloader) 
-            self.val_dataloader.sampler.default_order = False
+            self.train_dataloader.sampler.default_order = False
             self.train_dataloader.dataset.Return_Toggle = 'XY'
         elif (Which_Dataloader == 'Validation'):
             self.val_dataloader.dataset.Return_Toggle = 'X' # only return x
@@ -493,6 +554,7 @@ class Generic_Model_PyCox(GenericModel):
             self.val_dataloader.sampler.default_order = False
             self.val_dataloader.dataset.Return_Toggle = 'XY'
         else:
+            self.test_dataloader.dataset.Return_Toggle = 'X' # only return ECG, not labels
             cuts, t, d, surv, surv_df  = self.Run_NN(self.test_dataloader) # this is an UNSHUFFLED dataloader sent through TorchTuples (only output x, can't recover shufled y if shuffled)
         return cuts, t, d, surv, surv_df
 
@@ -514,7 +576,6 @@ class Generic_Model_PyCox(GenericModel):
             self.scheduler.load_state_dict(Import_Dict['scheduler_state_dict'])
         else:
             print("NO scheduler loaded")
-
         self.Load_Random_State(Import_Dict)
 
     # %%  save out the outputs at the -1'st layer of the model
@@ -524,7 +585,7 @@ class Generic_Model_PyCox(GenericModel):
         if (Which_Dataloader == 'Train'):  
             self.train_dataloader.batch_sampler.shuffle = False 
             my_dataloader = self.train_dataloader
-        if (Which_Dataloader == 'Validation'):  
+        elif (Which_Dataloader == 'Validation'):  
             my_dataloader = self.val_dataloader
         else:
             my_dataloader = self.test_dataloader
