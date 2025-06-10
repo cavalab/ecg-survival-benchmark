@@ -268,15 +268,39 @@ def simps(y, x=None, dx=1, axis=-1, even='avg'):
 def Load_Labels(args):
     start_time = time.time()
     datapath1 = os.path.dirname(os.getcwd()) # cleverly jump one one folder without referencing \\ (windows) or '/' (E3)
-    
-    if (args['Train_Folder'] == 'Code15'):
-        train_csv_path = os.path.join(datapath1, 'HDF5_DATA',args['Train_Folder'],'Labels_Code15_mort_032025_pd_8020.csv')
-    if (args['Train_Folder'] == 'BCH'):
-        train_csv_path = os.path.join(datapath1, 'HDF5_DATA',args['Train_Folder'],'BCH_Mort_Labels_042225.csv')
-    if (args['Train_Folder'] == 'MIMICIV'):
-        train_csv_path = os.path.join(datapath1, 'HDF5_DATA',args['Train_Folder'],'Labels_MIMICIV_mort_032025_pd_8020.csv')
-        # csv_path = os.path.join(datapath1, 'HDF5_DATA',args['Train_Folder'],'Labels_Code15_mort_032025_pd_8020.csv')
+
+    # Train: pull in one dataset or all?
+    if (args['Train_Folder'] == 'All'):
+        train_csv_path_C = os.path.join(datapath1, 'HDF5_DATA','Code15','Labels_Code15_mort_032025_pd_8020.csv')
+        train_csv_path_B = os.path.join(datapath1, 'HDF5_DATA','BCH','BCH_Mort_Labels_042225.csv')
+        train_csv_path_M = os.path.join(datapath1, 'HDF5_DATA','MIMICIV','Labels_MIMICIV_mort_032025_pd_8020.csv')
         
+        # pull datasets
+        train_labels_C = pd.read_csv(train_csv_path_C)
+        train_labels_B = pd.read_csv(train_csv_path_B)
+        train_labels_M = pd.read_csv(train_csv_path_M)
+        
+        train_labels_C['Dataset'] = 'Code15'
+        train_labels_B['Dataset'] = 'BCH'
+        train_labels_M['Dataset'] = 'MIMICIV'
+        
+        # merge datasets
+        train_labels = pd.concat((train_labels_C,train_labels_B,train_labels_M)).reset_index(drop=True) # without reset, index = 0,0,0,1,1,1,etc.
+        train_rows = train_labels[train_labels['Test_Train_split_12345']=='tr'].index.values
+
+    # Just one
+    else:
+        if (args['Train_Folder'] == 'Code15'):
+            train_csv_path = os.path.join(datapath1, 'HDF5_DATA',args['Train_Folder'],'Labels_Code15_mort_032025_pd_8020.csv')
+        if (args['Train_Folder'] == 'BCH'):
+            train_csv_path = os.path.join(datapath1, 'HDF5_DATA',args['Train_Folder'],'BCH_Mort_Labels_042225.csv')
+        if (args['Train_Folder'] == 'MIMICIV'):
+            train_csv_path = os.path.join(datapath1, 'HDF5_DATA',args['Train_Folder'],'Labels_MIMICIV_mort_032025_pd_8020.csv')
+            
+        train_labels = pd.read_csv(train_csv_path)
+        train_rows = train_labels[train_labels['Test_Train_split_12345']=='tr'].index.values
+
+    # Pull Test Data
     if (args['Test_Folder'] == 'Code15'):
         test_csv_path = os.path.join(datapath1, 'HDF5_DATA',args['Test_Folder'],'Labels_Code15_mort_032025_pd_8020.csv')
     if (args['Test_Folder'] == 'BCH'):
@@ -284,20 +308,9 @@ def Load_Labels(args):
     if (args['Test_Folder'] == 'MIMICIV'):
         test_csv_path = os.path.join(datapath1, 'HDF5_DATA',args['Test_Folder'],'Labels_MIMICIV_mort_032025_pd_8020.csv')
         
-    # 1. find test/train split rows
-    train_labels = pd.read_csv(train_csv_path)
-    train_rows = train_labels[train_labels['Test_Train_split_12345']=='tr'].index.values
-    
     test_labels = pd.read_csv(test_csv_path)
     test_rows  = test_labels[test_labels['Test_Train_split_12345']=='te'].index.values
     
-    # 2. Check for debug case - load only first 1k of each
-    if ('debug' in args.keys()):
-        if (args['debug']=='True'):
-            debug_amount = 5000
-            train_rows = train_rows[:debug_amount]
-            test_rows  = test_rows[:debug_amount]
-        
     # 3. split labels into test/train
     train_df  = train_labels.loc[train_rows].copy().reset_index(drop=True)
     test_df   = test_labels.loc[test_rows].copy().reset_index(drop=True)
@@ -311,6 +324,7 @@ def Load_Labels(args):
     return  train_df, test_df
 # %%
 def Load_ECG_and_Cov(train_df, valid_df, test_df, args):
+    # Handle debugging: limit df if needed
     # Load ECG; match the SID in case the ECG is out of order 
     # Input: dataframes, args
     # Outputs: Data{}, containing ECG and covariates in numpy arrays
@@ -319,37 +333,158 @@ def Load_ECG_and_Cov(train_df, valid_df, test_df, args):
     Data={}
     datapath1 = os.path.dirname(os.getcwd()) # cleverly jump one one folder without referencing \\ (windows) or '/' (E3)
     
-    if (args['Train_Folder'] == 'Code15'):
-        train_ecg_path = os.path.join(datapath1, 'HDF5_DATA',args['Train_Folder'],'Code15_ECG.hdf5')
-    if (args['Train_Folder'] == 'BCH'):
-        train_ecg_path = os.path.join(datapath1, 'HDF5_DATA',args['Train_Folder'],'BCH_All_ECG_042225.hdf5')
-    if (args['Train_Folder'] == 'MIMICIV'):
-        train_ecg_path = os.path.join(datapath1, 'HDF5_DATA',args['Train_Folder'],'MIMIC_ECG.hdf5')
-        # ecg_path = os.path.join(datapath1, 'HDF5_DATA',args['Train_Folder'],'Code15_ECG.hdf5')
+    # If pulling all training data
+    if (args['Train_Folder'] == 'All'):
+
+        # Split train/valid df by source (not needed for test set: one at a time there)
+        train_df_C = train_df[train_df['Dataset']=='Code15']
+        train_df_B = train_df[train_df['Dataset']=='BCH']
+        train_df_M = train_df[train_df['Dataset']=='MIMICIV']
         
+        valid_df_C = valid_df[valid_df['Dataset']=='Code15']
+        valid_df_B = valid_df[valid_df['Dataset']=='BCH']
+        valid_df_M = valid_df[valid_df['Dataset']=='MIMICIV']
+        
+        # Handle Debug Case
+        if ('debug' in args.keys()):
+            if (args['debug']=='True'): # keep 5K Tr/VAl/test each (do here, was NOT done earlier)
+                test_df = test_df.loc[0:4999].copy().reset_index(drop=True)
+                
+                train_df_C = train_df_C.loc[0:4999].copy().reset_index(drop=True)
+                train_df_B = train_df_B.loc[0:4999].copy().reset_index(drop=True)
+                train_df_M = train_df_M.loc[0:4999].copy().reset_index(drop=True)
+                
+                valid_df_C = valid_df_C.loc[0:4999].copy().reset_index(drop=True)
+                valid_df_B = valid_df_B.loc[0:4999].copy().reset_index(drop=True)
+                valid_df_M = valid_df_M.loc[0:4999].copy().reset_index(drop=True)
+                
+        # FIle locations
+        train_ecg_path_C = os.path.join(datapath1, 'HDF5_DATA','Code15','Code15_ECG.hdf5')
+        train_ecg_path_B = os.path.join(datapath1, 'HDF5_DATA','BCH','BCH_All_ECG_042225.hdf5')
+        train_ecg_path_M = os.path.join(datapath1, 'HDF5_DATA','MIMICIV','MIMIC_ECG.hdf5')
+                
+        # open hdf5
+        train_ECG = []
+        valid_ECG = []
+
+        # Pull C15
+        with h5py.File(train_ecg_path_C, "r") as f:
+            
+            # Pull Training ECG data
+            ECG_SID_Row  = {SID:i for i,SID in enumerate(f['SID'])} # Which ECG.h5 row corresponds to which SID?
+            rows_to_pull = np.array([ECG_SID_Row[SID] for SID in train_df_C['SID']]) # Find the rows for our dataframe
+            
+            train_ECG.append (f['ECG'][np.sort(rows_to_pull)]) # pull those rows in ascending order (hp5y requirement)
+            train_df_C['ECG_Row_Num'] = rows_to_pull # sort the dataframe in ascending row-pulled order
+            train_df_C = train_df_C.sort_values(by=["ECG_Row_Num"]).reset_index(drop=True)
+            
+            # Pull Validation ECG data
+            # ECG_SID_Row  = {SID:i for i,SID in enumerate(f['SID'])} # Which ECG.h5 row corresponds to which SID?
+            rows_to_pull = np.array([ECG_SID_Row[SID] for SID in valid_df_C['SID']]) # Find the rows for our dataframe
+            valid_ECG.append(f['ECG'][np.sort(rows_to_pull)]) # pull those rows in ascending order (hp5y requirement)
+            valid_df_C['ECG_Row_Num'] = rows_to_pull # sort the dataframe in ascending row-pulled order
+            valid_df_C = valid_df_C.sort_values(by=["ECG_Row_Num"]).reset_index(drop=True)
+            
+        # Pull BCH
+        with h5py.File(train_ecg_path_B, "r") as f:
+            
+            # Pull Training ECG data
+            ECG_SID_Row  = {SID:i for i,SID in enumerate(f['SID'])} # Which ECG.h5 row corresponds to which SID?
+            rows_to_pull = np.array([ECG_SID_Row[SID] for SID in train_df_B['SID']]) # Find the rows for our dataframe
+            
+            train_ECG.append (f['ECG'][np.sort(rows_to_pull)]) # pull those rows in ascending order (hp5y requirement)
+            train_df_B['ECG_Row_Num'] = rows_to_pull # sort the dataframe in ascending row-pulled order
+            train_df_B = train_df_B.sort_values(by=["ECG_Row_Num"]).reset_index(drop=True)
+            
+            # Pull Validation ECG data
+            # ECG_SID_Row  = {SID:i for i,SID in enumerate(f['SID'])} # Which ECG.h5 row corresponds to which SID?
+            rows_to_pull = np.array([ECG_SID_Row[SID] for SID in valid_df_B['SID']]) # Find the rows for our dataframe
+            valid_ECG.append(f['ECG'][np.sort(rows_to_pull)]) # pull those rows in ascending order (hp5y requirement)
+            valid_df_B['ECG_Row_Num'] = rows_to_pull # sort the dataframe in ascending row-pulled order
+            valid_df_B = valid_df_B.sort_values(by=["ECG_Row_Num"]).reset_index(drop=True)
+            
+        # Pull MIMICIV
+        with h5py.File(train_ecg_path_M, "r") as f:
+            # Pull Training ECG data
+            ECG_SID_Row  = {SID:i for i,SID in enumerate(f['SID'])} # Which ECG.h5 row corresponds to which SID?
+            rows_to_pull = np.array([ECG_SID_Row[SID] for SID in train_df_M['SID']]) # Find the rows for our dataframe
+            
+            # swap the MIMICIV ECG rows here to align with C15
+            tmp = f['ECG'][np.sort(rows_to_pull)]
+            tmp[:,:,[4,5]] = tmp[:,:,[5,4]] # switch ECG order
+            train_ECG.append(tmp.copy())
+            del tmp
+            train_df_M['ECG_Row_Num'] = rows_to_pull # sort the dataframe in ascending row-pulled order
+            train_df_M = train_df_M.sort_values(by=["ECG_Row_Num"]).reset_index(drop=True)
+            
+            # Pull Validation ECG data
+            # ECG_SID_Row  = {SID:i for i,SID in enumerate(f['SID'])} # Which ECG.h5 row corresponds to which SID?
+            rows_to_pull = np.array([ECG_SID_Row[SID] for SID in valid_df_M['SID']]) # Find the rows for our dataframe
+            
+            # swap the MIMICIV ECG rows here to align with C15
+            tmp = f['ECG'][np.sort(rows_to_pull)]
+            tmp[:,:,[4,5]] = tmp[:,:,[5,4]] # switch ECG order
+            valid_ECG.append(tmp.copy())
+            del tmp
+            
+            valid_df_M['ECG_Row_Num'] = rows_to_pull # sort the dataframe in ascending row-pulled order
+            valid_df_M = valid_df_M.sort_values(by=["ECG_Row_Num"]).reset_index(drop=True)
+            
+            # sanity check: 
+            # a = valid_ECG[-1][-1]
+            # plt.plot( a[:,0]-a[:,1]/2 - a[:,4]) # aVL, [:,4] in C15, is given by I -II/2; this should be roughly 0
+            
+        # merge the ECG and re-ordered dataframes, del list reference; garbage collector should handle list elements
+        train_df = pd.concat((train_df_C, train_df_B, train_df_M))
+        valid_df = pd.concat((valid_df_C, valid_df_B, valid_df_M))
+        Data['ECG_train'] = np.vstack(train_ECG).astype(np.float32)
+        Data['ECG_valid'] = np.vstack(valid_ECG).astype(np.float32)
+        del train_ECG
+        del valid_ECG
+        
+    # if pulling just one dataset
+    else:
+        
+        # handle debug case
+        if ('debug' in args.keys()):
+            if (args['debug']=='True'):
+                train_df = train_df.loc[0:4999].copy().reset_index(drop=True)
+                valid_df = valid_df.loc[0:4999].copy().reset_index(drop=True)
+                test_df  = test_df.loc[0:4999].copy().reset_index(drop=True)
+    
+        # Find pulling location
+        if (args['Train_Folder'] == 'Code15'):
+            train_ecg_path = os.path.join(datapath1, 'HDF5_DATA',args['Train_Folder'],'Code15_ECG.hdf5')
+        if (args['Train_Folder'] == 'BCH'):
+            train_ecg_path = os.path.join(datapath1, 'HDF5_DATA',args['Train_Folder'],'BCH_All_ECG_042225.hdf5')
+        if (args['Train_Folder'] == 'MIMICIV'):
+            train_ecg_path = os.path.join(datapath1, 'HDF5_DATA',args['Train_Folder'],'MIMIC_ECG.hdf5')
+            
+        # open hdf5
+        with h5py.File(train_ecg_path, "r") as f:
+            
+            # Pull Training ECG data
+            ECG_SID_Row  = {SID:i for i,SID in enumerate(f['SID'])} # Which ECG.h5 row corresponds to which SID?
+            rows_to_pull = np.array([ECG_SID_Row[SID] for SID in train_df['SID']]) # Find the rows for our dataframe
+            Data['ECG_train'] = f['ECG'][np.sort(rows_to_pull)] # pull those rows in ascending order (hp5y requirement)
+            train_df['ECG_Row_Num'] = rows_to_pull # sort the dataframe in ascending row-pulled order
+            train_df = train_df.sort_values(by=["ECG_Row_Num"]).reset_index(drop=True)
+            
+            # Pull Validation ECG data
+            # ECG_SID_Row  = {SID:i for i,SID in enumerate(f['SID'])} # Which ECG.h5 row corresponds to which SID?
+            rows_to_pull = np.array([ECG_SID_Row[SID] for SID in valid_df['SID']]) # Find the rows for our dataframe
+            Data['ECG_valid'] = f['ECG'][np.sort(rows_to_pull)] # pull those rows in ascending order (hp5y requirement)
+            valid_df['ECG_Row_Num'] = rows_to_pull # sort the dataframe in ascending row-pulled order
+            valid_df = valid_df.sort_values(by=["ECG_Row_Num"]).reset_index(drop=True)
+        
+        
+    # Test
     if (args['Test_Folder'] == 'Code15'):
         test_ecg_path = os.path.join(datapath1, 'HDF5_DATA',args['Test_Folder'],'Code15_ECG.hdf5')
     if (args['Test_Folder'] == 'BCH'):
         test_ecg_path = os.path.join(datapath1, 'HDF5_DATA',args['Test_Folder'],'BCH_All_ECG_042225.hdf5')
     if (args['Test_Folder'] == 'MIMICIV'):
         test_ecg_path = os.path.join(datapath1, 'HDF5_DATA',args['Test_Folder'],'MIMIC_ECG.hdf5')
-        
-    # 4. pull in ECG
-    with h5py.File(train_ecg_path, "r") as f:
-        
-        # Pull Training ECG data
-        ECG_SID_Row  = {SID:i for i,SID in enumerate(f['SID'])} # Which ECG.h5 row corresponds to which SID?
-        rows_to_pull = np.array([ECG_SID_Row[SID] for SID in train_df['SID']]) # Find the rows for our dataframe
-        Data['ECG_train'] = f['ECG'][np.sort(rows_to_pull)] # pull those rows in ascending order (hp5y requirement)
-        train_df['ECG_Row_Num'] = rows_to_pull # sort the dataframe in ascending row-pulled order
-        train_df = train_df.sort_values(by=["ECG_Row_Num"]).reset_index(drop=True)
-        
-        # Pull Validation ECG data
-        # ECG_SID_Row  = {SID:i for i,SID in enumerate(f['SID'])} # Which ECG.h5 row corresponds to which SID?
-        rows_to_pull = np.array([ECG_SID_Row[SID] for SID in valid_df['SID']]) # Find the rows for our dataframe
-        Data['ECG_valid'] = f['ECG'][np.sort(rows_to_pull)] # pull those rows in ascending order (hp5y requirement)
-        valid_df['ECG_Row_Num'] = rows_to_pull # sort the dataframe in ascending row-pulled order
-        valid_df = valid_df.sort_values(by=["ECG_Row_Num"]).reset_index(drop=True)
 
     with h5py.File(test_ecg_path, "r") as f:                            
         # Pull Test ECG data
@@ -374,7 +509,7 @@ def Load_ECG_and_Cov(train_df, valid_df, test_df, args):
     
     # if the lead order is different from the Code-15 standard, (MIMIC-IV), reorder test data to match training data
     if (args['Train_Folder'] != args['Test_Folder']):
-        # MIMICIV in test folder, change {I, II, III, avR, avF, avL} (from header files, differs from publication) to {I, II, III, avR, avL, avF}
+        # MIMICIV in test folder, change {I, II, III, avR, avF, avL} (from header files, differs from publication) to Code15's {I, II, III, avR, avL, avF}
         if (args['Test_Folder'] == 'MIMICIV') :
             Data['ECG_test'][:,:,[4,5]] = Data['ECG_test'][:,:,[5,4]]
             print('\n Reordered MIMICIV Test set to match non-MIMICIV Train Set\n')
